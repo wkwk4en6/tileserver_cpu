@@ -1,0 +1,9 @@
+assets/.DS_Store
+assets/fonts/.DS_Store
+.DS_Store
+/tile_cache
+world-pmtiles/dummy.pmtiles
+world-pmtiles/japan.pmtiles
+world-pmtiles/planet_z0-z9.pmtiles
+world-pmtiles/taiwan.pmtiles
+__pycache__/tileserver_cpu.cpython-312.pyc
