@@ -414,7 +414,7 @@ async def get_index():
     <body>
         <div id="map"></div>
         <script>
-            const map = L.map('map').setView([34.6873, 135.5262], 4);
+            const map = L.map('map').setView([34.6873, 135.5262], 6);
 
             L.tileLayer('/tile/{z}/{x}/{y}.png', {
                 minZoom: 0,
@@ -459,9 +459,6 @@ async def get_png_tile(z: int, x: int, y: int):
         headers=CACHE_HEADERS,
     )
 
+
 if __name__ == "__main__":
-    try:
-        uvicorn.run("tileserver_cpu:app", host="127.0.0.1", port=8990, reload=False)
-    except KeyboardInterrupt:
-        print("\n[Info] Server stopped by user.")
-        sys.exit(0)
+    uvicorn.run(app, host="0.0.0.0", port= 8989 + 1)

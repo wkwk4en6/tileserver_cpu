@@ -7,3 +7,5 @@ world-pmtiles/japan.pmtiles
 world-pmtiles/planet_z0-z9.pmtiles
 world-pmtiles/taiwan.pmtiles
 __pycache__/tileserver_cpu.cpython-312.pyc
+world-pmtiles/planet_z0.pmtiles
+world-pmtiles/base_0.mbtiles
