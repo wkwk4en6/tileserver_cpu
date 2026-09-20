@@ -26,7 +26,7 @@ A lightweight tile server and map viewer designed to generate and serve map tile
 
 ### 1. Clone the Repository
 ```bash
-git clone [https://github.com/wkwk4en6/tileserver_cpu.git](https://github.com/wkwk4en6/tileserver_cpu.git)
+git clone https://github.com/wkwk4en6/tileserver_cpu.git
 cd tileserver_cpu
 ```
 
