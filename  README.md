@@ -60,7 +60,7 @@ mkdir world-pmtiles
 #### Prepare Low-Zoom / Overview Data
 Use the `pmtiles` CLI tool to extract low-zoom data (zoom levels 0–7) from Protomaps official remote builds. The output file size is approximately 200 MB.
 
-On Windows, download the pre-compiled binary from protomaps/go-pmtiles releases.
+On Windows, download the pre-compiled binary from [protomaps/go-pmtiles](https://github.com/protomaps/go-pmtiles/releases) releases.
 ```Bash
 pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/planet_x0-z7.pmtiles --maxzoom=7
 ```
@@ -69,9 +69,9 @@ _Note: Replace 2026xxxx in the URL with the date of the latest build as needed._
 ### Download Detailed Map Data (BBBike)
 - Visit BBBike extracts: https://data.bbbike.org/osm/region/
 
-- Select your target area, choose PM Vector tiles Shortbread as the format, and extract/download the dataset.
+- Select your target area, choose PM Vector tiles Shortbread as the format, and download the dataset and unzip.
 
-- Place the downloaded .pmtiles file into the world-pmtiles/ directory.
+- Place the unzipped .pmtiles file into the world-pmtiles/ directory.
 
 ## Usage
 Start the tile server:

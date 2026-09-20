@@ -70,9 +70,9 @@ pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/plane
 
 - BBBike extracts([https://data.bbbike.org/osm/region/](https://data.bbbike.org/osm/region/)) にアクセスします。
 
-- 対象エリアを選択し、Format（フォーマット）で PM Vector tiles Shortbread を選択してデータを抽出・ダウンロードします。
+- 対象エリアを選択し、Format（フォーマット）で PM Vector tiles Shortbread を選択したら、データをダウンロードして展開します。
 
-- ダウンロードした .pmtiles ファイルを world-pmtiles/ フォルダ内に配置します。
+- 展開した .pmtiles ファイルを world-pmtiles/ フォルダ内に配置します。
 
 ## 実行方法 (Usage)
 サーバを起動します。
