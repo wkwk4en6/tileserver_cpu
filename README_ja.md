@@ -58,7 +58,7 @@ mkdir world-pmtiles
 ```
 #### 広域データの準備
 
-pmtiles CLI ツールを使用し、[Protomaps の公式リモートデータ](https://maps.protomaps.com/builds/)からズームレベル 0〜7 までの広域抽出を行います。   
+pmtiles CLI ツールを使用し、[Protomaps の公式リモートデータ](https://maps.protomaps.com/builds/)からズームレベル 0〜7 までの広域抽出を行います。ファイルサイズは200MB程度です。   
 Windws環境の場合は、コンパイル済みのバイナリを[protomaps/go-pmtiles](https://github.com/protomaps/go-pmtiles/releases)からDLしてください。
 
 ```Bash

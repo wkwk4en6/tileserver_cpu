@@ -58,11 +58,11 @@ mkdir world-pmtiles
 ```
 
 #### Prepare Low-Zoom / Overview Data
-Use the pmtiles CLI tool to extract low-zoom data (zoom levels 0–7) from Protomaps official remote builds.
+Use the `pmtiles` CLI tool to extract low-zoom data (zoom levels 0–7) from Protomaps official remote builds. The output file size is approximately 200 MB.
 
 On Windows, download the pre-compiled binary from protomaps/go-pmtiles releases.
 ```Bash
-pmtiles extract [https://build.protomaps.com/2026xxxx.pmtiles](https://build.protomaps.com/2026xxxx.pmtiles) world-pmtiles/planet_x0-z7.pmtiles --maxzoom=7
+pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/planet_x0-z7.pmtiles --maxzoom=7
 ```
 _Note: Replace 2026xxxx in the URL with the date of the latest build as needed._
 
