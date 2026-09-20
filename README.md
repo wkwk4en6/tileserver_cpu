@@ -106,6 +106,3 @@ Leaflet: BSD 2-Clause License
 Noto Sans CJK: SIL Open Font License 1.1
 
 Map Data: © OpenStreetMap contributors
-
-作者 / ライセンス (Author / License)
-This project is licensed under the MIT License - see the LICENSE file for details.
