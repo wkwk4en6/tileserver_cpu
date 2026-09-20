@@ -15,7 +15,7 @@ PMTiles データから地図タイルを生成・配信し、Web ブラウザ�
 
 ## 必要条件 (Requirements)
 
-- Python 3.10+
+- Python 3.12+
 - （その他依存ライブラリは `requirements.txt` を参照）
 
 ---
