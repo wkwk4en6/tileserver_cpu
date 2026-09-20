@@ -100,7 +100,7 @@ http://localhost:8990
 │   └── *.pmtiles
 ├── cache_tiles/           # タイルキャッシュ（※サーバ起動後自動作成）
 ├── tile_cache.db          # 生成されたキャッシュDB（※サーバ起動後自動作成）
-├── tileserver_cpu.py                # タイルサーバのメインプログラム
+├── tileserver_cpu.py      # タイルサーバのメインプログラム
 ├── requirements.txt       # Python依存パッケージ一覧
 └── README.md
 ```
