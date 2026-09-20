@@ -35,7 +35,7 @@ cd tileserver_cpu
 Conda を使用する場合（推奨）:
 ```bash
 # 仮想環境の作成
-conda create -n tile-server python=3.10 -y
+conda create -n tile-server python=3.12 -y
 conda activate tile-server
 
 # 依存ライブラリのインストール
@@ -58,21 +58,21 @@ mkdir world-pmtiles
 ```
 #### 広域データの準備
 
-pmtiles CLI ツールを使用し、Protomaps の公式リモートデータからズームレベル 0〜7 までの広域抽出を行います。   
+pmtiles CLI ツールを使用し、[Protomaps の公式リモートデータ](https://maps.protomaps.com/builds/)からズームレベル 0〜7 までの広域抽出を行います。   
 Windws環境の場合は、コンパイル済みのバイナリを[protomaps/go-pmtiles](https://github.com/protomaps/go-pmtiles/releases)からDLしてください。
 
 ```Bash
 pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/planet_x0-z7.pmtiles --maxzoom=7
 ```
-※ URL の日付部分(2026xxxx)は必要に応じて最新のビルドデータに変更してください。
+※ _URL の日付部分(2026xxxx)は必要に応じて最新のビルドデータに変更してください。_
 
 #### 詳細マップデータのダウンロード (BBBike)
 
-BBBike extracts([https://data.bbbike.org/osm/region/](https://data.bbbike.org/osm/region/)) にアクセスします。
+- BBBike extracts([https://data.bbbike.org/osm/region/](https://data.bbbike.org/osm/region/)) にアクセスします。
 
-対象エリアを選択し、Format（フォーマット）で PM Vector tiles Shortbread を選択してデータを抽出・ダウンロードします。
+- 対象エリアを選択し、Format（フォーマット）で PM Vector tiles Shortbread を選択してデータを抽出・ダウンロードします。
 
-ダウンロードした .pmtiles ファイルを world-pmtiles/ フォルダ内に配置します。
+- ダウンロードした .pmtiles ファイルを world-pmtiles/ フォルダ内に配置します。
 
 ## 実行方法 (Usage)
 サーバを起動します。
@@ -90,10 +90,11 @@ http://localhost:8990
 │   ├── leaflet.js
 │   ├── leaflet.css
 │   └── fonts/NotoSansCJK-Regular/NotoSansCJK-Regular.ttc             
-├── world-pmtiles/         # PMTiles データ格納用（.gitignoreで除外）
+├── world-pmtiles/         # PMTiles データ格納用
 │   ├── planet_x0-z7.pmtiles
 │   └── *.pmtiles
-├── cache_tiles/           # 生成されたタイルキャッシュ（.gitignoreで除外）
+├── cache_tiles/           # タイルキャッシュ（※サーバ起動後自動作成）
+├── tile_cache.db          # 生成されたキャッシュDB（※サーバ起動後自動作成）
 ├── tileserver_cpu.py                # タイルサーバのメインプログラム
 ├── requirements.txt       # Python依存パッケージ一覧
 └── README.md
@@ -101,8 +102,8 @@ http://localhost:8990
 ## ライセンス (Licenses & Acknowledgments)
 本プロジェクトおよび使用しているサードパーティ製アセットのライセンス情報は以下の通りです。
 
-Leaflet: BSD 2-Clause License
+- Leaflet: BSD 2-Clause License
 
-Noto Sans CJK: SIL Open Font License 1.1
+- Noto Sans CJK: SIL Open Font License 1.1
 
-Map Data: © OpenStreetMap contributors
+- Map Data: © OpenStreetMap contributors

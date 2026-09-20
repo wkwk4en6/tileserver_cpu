@@ -69,6 +69,8 @@ normal_pmtiles: List[LoadedPMTiles] = []
 
 executor = ProcessPoolExecutor()
 
+# このヘッダーは、`/tile/{z}/{x}/{y}.png` エンドポイントから PNG タイル画像を返却する際に HTTP レスポンスヘッダーとして付与されます。
+# これにより、一度読み込んだタイル画像は 24 時間ブラウザ側にキャッシュされ、無駄な再リクエストを防ぐ仕組みになっています。
 CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
 
 # 色の定数定義
