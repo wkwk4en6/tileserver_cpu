@@ -61,6 +61,12 @@ mkdir world-pmtiles
 Use the `pmtiles` CLI tool to extract low-zoom data (zoom levels 0–7) from Protomaps official remote builds. The output file size is approximately 200 MB.
 
 On Windows, download the pre-compiled binary from [protomaps/go-pmtiles](https://github.com/protomaps/go-pmtiles/releases) releases.
+
+For macOS, install it using the following command:
+```bash
+brew install pmtiles
+```
+Once the pmtiles tool is installed, extract the PMTiles data from the official website.
 ```Bash
 pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/planet_x0-z7.pmtiles --maxzoom=7
 ```

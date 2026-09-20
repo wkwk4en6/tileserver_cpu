@@ -60,6 +60,11 @@ mkdir world-pmtiles
 
 pmtiles CLI ツールを使用し、[Protomaps の公式リモートデータ](https://maps.protomaps.com/builds/)からズームレベル 0〜7 までの広域抽出を行います。ファイルサイズは200MB程度です。   
 Windws環境の場合は、コンパイル済みのバイナリを[protomaps/go-pmtiles](https://github.com/protomaps/go-pmtiles/releases)からDLしてください。
+Mac環境の場合は、下記コマンドでインストールしてください
+```Bash
+brew install pmtiles
+```
+pmtiles ツールをインストールしたら、公式サイトからpmtilesを抽出します。
 
 ```Bash
 pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/planet_x0-z7.pmtiles --maxzoom=7
