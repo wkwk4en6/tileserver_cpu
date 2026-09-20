@@ -74,7 +74,7 @@ BBBike extracts([https://data.bbbike.org/osm/region/](https://data.bbbike.org/os
 
 ダウンロードした .pmtiles ファイルを world-pmtiles/ フォルダ内に配置します。
 
-### 実行方法 (Usage)
+## 実行方法 (Usage)
 サーバを起動します。
 
 ```Bash
@@ -83,7 +83,7 @@ python tileserver_cpu.py
 起動後、ブラウザで以下のURLにアクセスしてください：
 http://localhost:8990
 
-リポジトリの構成 (Directory Structure)
+## リポジトリの構成 (Directory Structure)
 ```Plaintext
 .
 ├── assets/                # フロントエンドアセット（Leaflet, CSS, Fonts など）
@@ -98,7 +98,7 @@ http://localhost:8990
 ├── requirements.txt       # Python依存パッケージ一覧
 └── README.md
 ```
-### ライセンス (Licenses & Acknowledgments)
+## ライセンス (Licenses & Acknowledgments)
 本プロジェクトおよび使用しているサードパーティ製アセットのライセンス情報は以下の通りです。
 
 Leaflet: BSD 2-Clause License
