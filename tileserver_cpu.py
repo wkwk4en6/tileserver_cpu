@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Query, Response
 from fastapi.responses import FileResponse, HTMLResponse
@@ -55,7 +55,7 @@ class LoadedPMTiles:
         tile_min_lat = tile2lat(y + 1, z)
 
         # 境界での僅かな誤差を許容するためマージンを持たせる
-        margin = 1e-5
+        margin = 1e-3
         if (tile_max_lon + margin) < self.min_lon or (tile_min_lon - margin) > self.max_lon:
             return False
         if (tile_max_lat + margin) < self.min_lat or (tile_min_lat - margin) > self.max_lat:
@@ -69,8 +69,6 @@ normal_pmtiles: List[LoadedPMTiles] = []
 
 executor = ProcessPoolExecutor()
 
-# このヘッダーは、`/tile/{z}/{x}/{y}.png` エンドポイントから PNG タイル画像を返却する際に HTTP レスポンスヘッダーとして付与されます。
-# これにより、一度読み込んだタイル画像は 24 時間ブラウザ側にキャッシュされ、無駄な再リクエストを防ぐ仕組みになっています。
 CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
 
 # 色の定数定義
@@ -189,6 +187,7 @@ async def lifespan(app: FastAPI):
                         priority_pmtiles.append(item)
                     else:
                         normal_pmtiles.append(item)
+                    print(f"[Loaded PMTiles] {p.name} (min_z: {item.min_zoom}, max_z: {item.max_zoom}, bounds: ({item.min_lon}, {item.min_lat}) - ({item.max_lon}, {item.max_lat}))")
                 except Exception as e:
                     print(f"[Error] Failed to load {p.name}: {e}")
 
@@ -203,49 +202,97 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-
 def fetch_pbf_from_filepath(
     priority_list: List[LoadedPMTiles],
     normal_list: List[LoadedPMTiles],
     z: int, x: int, y: int
-) -> Tuple[List[bytes], int, int, int, List[str]]:
-    """
-    該当するすべての PMTiles から PBF データを取得してリストで返す
-    """
+) -> Tuple[List[bytes], int, int, int, List[str], List[str], Dict[str, Dict[str, int]]]:
     max_tile = 1 << z
     if x < 0 or x >= max_tile or y < 0 or y >= max_tile:
-        return [], z, x, y, []
+        return [], z, x, y, [], [], {}
 
     pbf_list = []
     used_filenames = []
+    intersected_filenames = []
+    used_layer_details: Dict[str, Dict[str, int]] = {}
+
+    for pmtile in priority_list + normal_list:
+        if pmtile.intersects_tile(z, x, y):
+            intersected_filenames.append(pmtile.path.name)
 
     for dz in range(0, z + 1):
         curr_z = z - dz
         curr_x = x >> dz
         curr_y_xyz = y >> dz
-        curr_y_tms = (1 << curr_z) - 1 - curr_y_xyz
 
         candidate_priority = [p for p in priority_list if p.intersects_tile(curr_z, curr_x, curr_y_xyz)]
         candidate_normal = [p for p in normal_list if p.intersects_tile(curr_z, curr_x, curr_y_xyz)]
 
-        for pmtile in candidate_priority + candidate_normal:
-            for check_y in [curr_y_xyz, curr_y_tms]:
+        all_candidates = candidate_priority + candidate_normal
+        if not all_candidates:
+            continue
+
+        found_in_this_zoom = False
+        zoom_layer_details: Dict[str, Dict[str, int]] = {}
+
+        # ズームレベル8以下のときは、複数ソースをマージせず最初にヒットした1つのファイルのみ採用する
+        if curr_z <= 8:
+            all_candidates = all_candidates[:1]
+
+        for pmtile in all_candidates:
+            # 【修正】上下のタイルで同じ形状が重複する原因となる不要なTMS座標へのフォールバックを廃止し、正確なXYZ座標のみを使用する
+            check_targets = [curr_y_xyz]
+
+            for check_y in check_targets:
                 try:
                     tile_data = pmtile.reader.get(curr_z, curr_x, check_y)
                     if tile_data and len(tile_data) > 0:
                         if tile_data[:2] == b"\x1f\x8b":
                             tile_data = gzip.decompress(tile_data)
+                        
+                        try:
+                            decoded = mapbox_vector_tile.decode(tile_data, default_options={"y_coord_down": True})
+                            
+                            layer_features_count = {}
+                            valid_layers_count = 0
+
+                            for lname, ldata in decoded.items():
+                                f_list = ldata.get("features", [])
+                                f_count = len(f_list)
+                                if f_count > 0:
+                                    layer_features_count[lname] = f_count
+                                    valid_layers_count += 1
+
+                            # バリデーション条件は変えずそのまま維持
+                            if valid_layers_count < 4:
+                                continue
+
+                        except Exception:
+                            continue
+
                         pbf_list.append(tile_data)
-                        used_filenames.append(pmtile.path.name)
-                        break # この PMTiles から取得できたら次の PMTiles の判定へ
+                        if pmtile.path.name not in used_filenames:
+                            used_filenames.append(pmtile.path.name)
+                        
+                        if pmtile.path.name not in zoom_layer_details:
+                            zoom_layer_details[pmtile.path.name] = {}
+                        for lname, count in layer_features_count.items():
+                            zoom_layer_details[pmtile.path.name][lname] = zoom_layer_details[pmtile.path.name].get(lname, 0) + count
+
+                        found_in_this_zoom = True
+                        
+                        if curr_z <= 8:
+                            break
                 except Exception:
                     continue
+            
+            if curr_z <= 8 and found_in_this_zoom:
+                break
 
-        # 現在のズームレベルで 1 つ以上の PMTiles からデータが得られたらそのズームで確定
-        if pbf_list:
-            return pbf_list, curr_z, curr_x, curr_y_xyz, used_filenames
+        if found_in_this_zoom:
+            return pbf_list, curr_z, curr_x, curr_y_xyz, used_filenames, intersected_filenames, zoom_layer_details
 
-    return [], z, x, y, []
+    return [], z, x, y, [], [], {}
 
 
 def render_3x3_tile_skia(
@@ -254,7 +301,6 @@ def render_3x3_tile_skia(
     target_y: int,
     pbf_tiles_data: List[Tuple[int, int, Optional[bytes], int, int, int]]
 ) -> bytes:
-    # z >= 18 のときは 3x3 (768x768)、z < 18 のときは 1x1 (256x256)
     is_multi_tile = target_z >= 18
     canvas_size = 768 if is_multi_tile else 256
     tile_size = 256.0
@@ -300,7 +346,6 @@ def render_3x3_tile_skia(
     paint_road = skia.Paint(Color=ROAD_COLOR, AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=0.9)
     paint_line = skia.Paint(Color=LINE_COLOR, AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=0.8)
 
-    # 描画優先順位の定義（背景陸地 -> 水域 -> グリーン・施設 -> 建物 -> 道路 -> ラベル）
     def get_layer_priority(name: str) -> int:
         n = name.lower()
         if "earth" in n or "land" in n or "boundary" in n: return 5
@@ -316,7 +361,7 @@ def render_3x3_tile_skia(
         for pbf_data in pbf_bytes_list:
             if pbf_data:
                 try:
-                    decoded = mapbox_vector_tile.decode(pbf_data, y_coord_down=True)
+                    decoded = mapbox_vector_tile.decode(pbf_data, default_options={"y_coord_down": True})
                     tiles_to_process.append((dx, dy, decoded, actual_z, actual_x, actual_y))
                 except Exception as e:
                     print(f"[Decode Error] {e}")
@@ -363,7 +408,6 @@ def render_3x3_tile_skia(
             min_y = sub_y * unit
             scale = tile_size / unit
 
-            # z < 18 (is_multi_tile=False) の場合はオフセット 0.0
             offset_x = (dx + 1) * tile_size if is_multi_tile else 0.0
             offset_y = (dy + 1) * tile_size if is_multi_tile else 0.0
 
@@ -495,7 +539,6 @@ def render_3x3_tile_skia(
 
     full_image = base_surface.makeImageSnapshot()
 
-    # 3x3 描画時は中央の 256x256 をクロップ、1x1 描画時はそのまま出力
     if is_multi_tile:
         final_surface = skia.Surface(256, 256)
         final_canvas = final_surface.getCanvas()
@@ -528,15 +571,23 @@ async def get_index():
         <style>
             html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
             .debug-info-control {
-                background: rgba(255, 255, 255, 0.9);
-                padding: 6px 10px;
+                background: rgba(255, 255, 255, 0.95);
+                padding: 8px 12px;
                 font-family: monospace;
-                font-size: 12px;
+                font-size: 11px;
                 border-radius: 4px;
                 box-shadow: 0 0 5px rgba(0,0,0,0.3);
-                line-height: 1.5;
+                line-height: 1.4;
+                max-width: 360px;
+                max-height: 80vh;
+                overflow-y: auto;
             }
             .debug-info-control a { color: #0066cc; text-decoration: underline; font-weight: bold; }
+            .layer-details {
+                margin-left: 10px;
+                font-size: 10px;
+                color: #444;
+            }
         </style>
     </head>
     <body>
@@ -554,17 +605,36 @@ async def get_index():
             tileGridLayer.createTile = function (coords) {
                 const tile = document.createElement('div');
                 tile.style.boxSizing = 'border-box';
-                tile.style.border = '1px solid rgba(255, 0, 0, 0.5)';
+                tile.style.border = '1px solid rgba(255, 0, 0, 0.4)';
                 tile.style.fontFamily = 'monospace';
-                tile.style.fontSize = '11px';
+                tile.style.fontSize = '9px';
                 tile.style.color = 'red';
-                tile.style.padding = '4px';
+                tile.style.padding = '2px';
                 tile.style.pointerEvents = 'none';
-                tile.innerHTML = `z:${coords.z}<br>x:${coords.x}<br>y:${coords.y}`;
+                tile.style.overflow = 'hidden';
+
+                fetch(`/tile/debug/${coords.z}/${coords.x}/${coords.y}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        let detailsHtml = '';
+                        if (data.layer_details) {
+                            for (const [fname, layers] of Object.entries(data.layer_details)) {
+                                detailsHtml += `&nbsp;&nbsp;<b>${fname}:</b><br>`;
+                                for (const [lname, count] of Object.entries(layers)) {
+                                    detailsHtml += `&nbsp;&nbsp;&nbsp;&nbsp;- ${lname}: ${count} feats<br>`;
+                                }
+                            }
+                        }
+
+                        tile.innerHTML = `<b>z:${coords.z} x:${coords.x} y:${coords.y}</b><br>` +
+                                         `<span style="color:#008000">Intersected:</span> ${data.intersected.join(', ') || 'None'}<br>` +
+                                         `<span style="color:#0000ff">Render Source:</span><br>${detailsHtml || 'None'}`;
+                    }).catch(e => {});
+
                 return tile;
             };
 
-            const overlayMaps = { "タイルグリッド (マス目)": tileGridLayer };
+            const overlayMaps = { "タイルグリッド & デバッグ表示": tileGridLayer };
             L.control.layers(null, overlayMaps, { position: 'topright' }).addTo(map);
 
             const DebugControl = L.Control.extend({
@@ -586,25 +656,78 @@ async def get_index():
 
                     const tileUrl = `/tile/${zoom}/${tileX}/${tileY}.png`;
 
-                    this._container.innerHTML = `
-                        <b>Center Tile Debug Info</b><br>
-                        Zoom: ${zoom} | X: ${tileX} | Y: ${tileY}<br>
-                        <a href="${tileUrl}" target="_blank" rel="noopener">Open Current Center Tile PNG ↗</a>
-                    `;
+                    fetch(`/tile/debug/${zoom}/${tileX}/${tileY}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            let detailsHtml = '';
+                            if (data.layer_details && Object.keys(data.layer_details).length > 0) {
+                                for (const [fname, layers] of Object.entries(data.layer_details)) {
+                                    detailsHtml += `<div style="margin-top:2px;"><b>📁 ${fname}</b></div>`;
+                                    for (const [lname, count] of Object.entries(layers)) {
+                                        detailsHtml += `<div class="layer-details">▫️ ${lname}: <b>${count}</b> feats</div>`;
+                                    }
+                                }
+                            } else {
+                                detailsHtml = ' None';
+                            }
+
+                            this._container.innerHTML = `
+                                <b>Center Tile Info</b><br>
+                                Zoom: ${zoom} | X: ${tileX} | Y: ${tileY}<br>
+                                Bounds: [${data.lat_min?.toFixed(3)}, ${data.lon_min?.toFixed(3)}] ~ [${data.lat_max?.toFixed(3)}, ${data.lon_max?.toFixed(3)}]<br>
+                                <span style="color:#008000"><b>Intersected:</b></span> ${data.intersected.join(', ') || 'None'}<br>
+                                <span style="color:#0000ff"><b>Render Source & Vector Content:</b></span><br>${detailsHtml}<br>
+                                <div style="margin-top:4px;"><a href="${tileUrl}" target="_blank" rel="noopener">Open Current Center Tile PNG ↗</a></div>`;
+                        });
                 }
             });
 
             const debugControl = new DebugControl();
-            map.addControl(debugControl);
+
+            tileGridLayer.on('add', function () {
+                map.addControl(debugControl);
+            });
+
+            tileGridLayer.on('remove', function () {
+                map.removeControl(debugControl);
+            });
 
             map.on('moveend', function () {
-                debugControl.update();
+                if (map.hasLayer(debugControl)) {
+                    debugControl.update();
+                }
             });
         </script>
     </body>
     </html>
     """
     return HTMLResponse(content=html_content)
+
+
+@app.get("/tile/debug/{z}/{x}/{y}")
+async def get_tile_debug(z: int, x: int, y: int):
+    _, _, _, _, used_filenames, intersected_filenames, layer_details = fetch_pbf_from_filepath(
+        priority_pmtiles, normal_pmtiles, z, x, y
+    )
+    
+    n = 1 << z
+    lon_min = x / n * 360.0 - 180.0
+    lon_max = (x + 1) / n * 360.0 - 180.0
+    def tile2lat(y_val, z_val):
+        n_val = math.pi - (2.0 * math.pi * y_val) / (1 << z_val)
+        return math.degrees(math.atan(math.sinh(n_val)))
+    lat_max = tile2lat(y, z)
+    lat_min = tile2lat(y + 1, z)
+
+    return {
+        "intersected": intersected_filenames,
+        "used": used_filenames,
+        "layer_details": layer_details,
+        "lon_min": lon_min,
+        "lon_max": lon_max,
+        "lat_min": lat_min,
+        "lat_max": lat_max
+    }
 
 
 @app.get("/tile/{z}/{x}/{y}.png")
@@ -618,14 +741,13 @@ async def get_png_tile(z: int, x: int, y: int):
     pbf_tiles_data = []
     used_pmtiles = set()
 
-    # z >= 18 のときのみ 3x3 (周囲1マス) を取得。z < 18 は対象の 1 マスのみ
     offsets = [-1, 0, 1] if z >= 18 else [0]
 
     for dy in offsets:
         for dx in offsets:
             curr_x = x + dx
             curr_y = y + dy
-            pbf_list, actual_z, actual_x, actual_y, filenames = fetch_pbf_from_filepath(
+            pbf_list, actual_z, actual_x, actual_y, filenames, _, _ = fetch_pbf_from_filepath(
                 priority_pmtiles, normal_pmtiles, z, curr_x, curr_y
             )
             pbf_tiles_data.append((dx, dy, pbf_list, actual_z, actual_x, actual_y))
@@ -647,4 +769,4 @@ async def get_png_tile(z: int, x: int, y: int):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8990)
+    uvicorn.run(app, host="0.0.0.0", port=8990)
