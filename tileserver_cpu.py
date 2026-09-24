@@ -164,9 +164,14 @@ def create_empty_tile_png() -> bytes:
     surface = skia.Surface(256, 256)
     surface.getCanvas().clear(LAND_COLOR)
     image = surface.makeImageSnapshot()
-    # フォーマットと品質(100)を明示的に指定
+    
+    # 第1引数に PNG、第2引数に品質(100)を明示的に指定
     data = image.encodeToData(skia.EncodedImageFormat.kPNG, 100)
-    return data.bytes() if data is not None else EMPTY_TILE_BYTES
+    if data is None:
+        # 万が一失敗した場合は引数なし（デフォルトPNG）でフォールバック
+        data = image.encodeToData()
+        
+    return data.bytes() if data is not None else b""
 
 
 EMPTY_TILE_BYTES = create_empty_tile_png()
@@ -561,8 +566,11 @@ def render_3x3_tile_skia(
     else:
         image = full_image
 
-    # 改善ポイント: PNGのエンコードオプションでフィルタ探索をスキップし最速化
-    data = image.encodeToData(skia.EncodedImageFormat.kWEBP, quality=80)
+    # 確実に PNG フォーマットでエンコード
+    data = image.encodeToData(skia.EncodedImageFormat.kPNG, 100)
+    if data is None:
+        data = image.encodeToData()
+        
     return data.bytes() if data is not None else EMPTY_TILE_BYTES
 
 
