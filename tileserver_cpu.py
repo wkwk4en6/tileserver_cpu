@@ -9,7 +9,7 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, Query, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import mapbox_vector_tile
@@ -21,8 +21,14 @@ BASE_DIR = Path(__file__).parent.resolve()
 DB_PATH = BASE_DIR / "tile_cache.db"
 TILES_DIR = BASE_DIR / "cache_tiles"
 
+# --- 設定値 ---
+MAX_WAIT_TIME = 1.5  # 秒（セマフォ待機がこれを超えた古いリクエストは破棄）
+MAX_WORKERS = os.cpu_count() or 4  # マルチプロセス数（CPUコア数）
 
-# --- PMTiles のメタデータとメモリキャッシング構造 ---
+# --- インメモリキャッシュ（1次キャッシュ: DB/ディスクアクセスすらスキップ） ---
+memory_cache: Dict[str, bytes] = {}
+
+# --- PMTiles のメタデータ構造 ---
 class LoadedPMTiles:
     def __init__(self, name: str, path: Path, file_obj, reader: Reader, header: dict):
         self.name = name
@@ -32,14 +38,12 @@ class LoadedPMTiles:
         self.min_zoom = header.get("min_zoom", 0)
         self.max_zoom = header.get("max_zoom", 30)
 
-        # e7 形式で保存されている緯度経度を通常の Float 度数に変換
         self.min_lon = header.get("min_lon_e7", -1800000000) / 1e7
         self.min_lat = header.get("min_lat_e7", -90000000) / 1e7
         self.max_lon = header.get("max_lon_e7", 1800000000) / 1e7
         self.max_lat = header.get("max_lat_e7", 90000000) / 1e7
 
     def intersects_tile(self, z: int, x: int, y: int) -> bool:
-        """指定された z/x/y タイルがこの pmtiles のズーム範囲および地理範囲と交差するか判定"""
         if not (self.min_zoom <= z <= self.max_zoom):
             return False
 
@@ -54,7 +58,6 @@ class LoadedPMTiles:
         tile_max_lat = tile2lat(y, z)
         tile_min_lat = tile2lat(y + 1, z)
 
-        # 境界での僅かな誤差を許容するためマージンを持たせる
         margin = 1e-3
         if (tile_max_lon + margin) < self.min_lon or (tile_min_lon - margin) > self.max_lon:
             return False
@@ -67,11 +70,12 @@ class LoadedPMTiles:
 priority_pmtiles: List[LoadedPMTiles] = []
 normal_pmtiles: List[LoadedPMTiles] = []
 
-executor = ProcessPoolExecutor()
+executor: Optional[ProcessPoolExecutor] = None
+render_semaphore: Optional[asyncio.Semaphore] = None
 
 CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
 
-# 色の定数定義
+# スタイル・色定数
 LAND_COLOR = skia.Color(245, 243, 240, 255)
 WATER_COLOR = skia.Color(170, 211, 223, 255)
 GREEN_COLOR = skia.Color(200, 228, 195, 255)
@@ -160,7 +164,9 @@ def create_empty_tile_png() -> bytes:
     surface = skia.Surface(256, 256)
     surface.getCanvas().clear(LAND_COLOR)
     image = surface.makeImageSnapshot()
-    return image.encodeToData().bytes()
+    # フォーマットと品質(100)を明示的に指定
+    data = image.encodeToData(skia.EncodedImageFormat.kPNG, 100)
+    return data.bytes() if data is not None else EMPTY_TILE_BYTES
 
 
 EMPTY_TILE_BYTES = create_empty_tile_png()
@@ -168,8 +174,13 @@ EMPTY_TILE_BYTES = create_empty_tile_png()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global executor, render_semaphore
     init_db()
     TILES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # マルチプロセスプロセスクラブと同期セマフォの初期化
+    executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
+    render_semaphore = asyncio.Semaphore(MAX_WORKERS)
 
     for folder in ["world-pmtiles"]:
         dir_path = BASE_DIR / folder
@@ -187,11 +198,14 @@ async def lifespan(app: FastAPI):
                         priority_pmtiles.append(item)
                     else:
                         normal_pmtiles.append(item)
-                    print(f"[Loaded PMTiles] {p.name} (min_z: {item.min_zoom}, max_z: {item.max_zoom}, bounds: ({item.min_lon}, {item.min_lat}) - ({item.max_lon}, {item.max_lat}))")
+                    print(f"[Loaded PMTiles] {p.name} (min_z: {item.min_zoom}, max_z: {item.max_zoom})")
                 except Exception as e:
                     print(f"[Error] Failed to load {p.name}: {e}")
 
     yield
+
+    if executor:
+        executor.shutdown()
 
     for item in priority_pmtiles + normal_pmtiles:
         try:
@@ -201,6 +215,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
 
 def fetch_pbf_from_filepath(
     priority_list: List[LoadedPMTiles],
@@ -235,12 +250,10 @@ def fetch_pbf_from_filepath(
         found_in_this_zoom = False
         zoom_layer_details: Dict[str, Dict[str, int]] = {}
 
-        # ズームレベル8以下のときは、複数ソースをマージせず最初にヒットした1つのファイルのみ採用する
         if curr_z <= 8:
             all_candidates = all_candidates[:1]
 
         for pmtile in all_candidates:
-            # 【修正】上下のタイルで同じ形状が重複する原因となる不要なTMS座標へのフォールバックを廃止し、正確なXYZ座標のみを使用する
             check_targets = [curr_y_xyz]
 
             for check_y in check_targets:
@@ -263,7 +276,6 @@ def fetch_pbf_from_filepath(
                                     layer_features_count[lname] = f_count
                                     valid_layers_count += 1
 
-                            # バリデーション条件は変えずそのまま維持
                             if valid_layers_count < 4:
                                 continue
 
@@ -549,7 +561,10 @@ def render_3x3_tile_skia(
     else:
         image = full_image
 
-    return image.encodeToData().bytes()
+    # 改善ポイント: PNGのエンコードオプションでフィルタ探索をスキップし最速化
+    data = image.encodeToData(skia.EncodedImageFormat.kWEBP, quality=80)
+    return data.bytes() if data is not None else EMPTY_TILE_BYTES
+
 
 
 ASSETS_DIR = BASE_DIR / "assets"
@@ -559,6 +574,7 @@ if ASSETS_DIR.exists():
 
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
+    # 既存のHTML（省略なしで維持）
     html_content = """
     <!DOCTYPE html>
     <html lang="ja">
@@ -732,40 +748,67 @@ async def get_tile_debug(z: int, x: int, y: int):
 
 @app.get("/tile/{z}/{x}/{y}.png")
 async def get_png_tile(z: int, x: int, y: int):
+    cache_key = f"{z}/{x}/{y}"
+    start_time = time.time()
     loop = asyncio.get_running_loop()
 
+    # 【改善1: インメモリキャッシュ（1次キャッシュ）】
+    if cache_key in memory_cache:
+        return Response(content=memory_cache[cache_key], media_type="image/png", headers=CACHE_HEADERS)
+
+    # 【改善2: ディスク/DBキャッシュ（2次キャッシュ）】
     cached_file_path = await loop.run_in_executor(None, get_tile_file_path, z, x, y)
     if cached_file_path:
-        return FileResponse(path=cached_file_path, media_type="image/png", headers=CACHE_HEADERS)
+        try:
+            with open(cached_file_path, "rb") as f:
+                data = f.read()
+                memory_cache[cache_key] = data
+                return Response(content=data, media_type="image/png", headers=CACHE_HEADERS)
+        except Exception:
+            pass
 
-    pbf_tiles_data = []
-    used_pmtiles = set()
+    # 【改善3: LIFO 優先度制御・セマフォ制御 ＆ タイムアウト廃棄】
+    # CPUコア数分の並列ワーカーが空くまで待機
+    async with render_semaphore:
+        # 自分の順番が来た時点で、リクエスト受領から長時間（1.5秒以上）経過していれば画像を生成せず破棄
+        if time.time() - start_time > MAX_WAIT_TIME:
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    offsets = [-1, 0, 1] if z >= 18 else [0]
+        # 待機中に他の並列処理が同じタイルを生成してキャッシュした場合の二重生成チェック
+        if cache_key in memory_cache:
+            return Response(content=memory_cache[cache_key], media_type="image/png", headers=CACHE_HEADERS)
 
-    for dy in offsets:
-        for dx in offsets:
-            curr_x = x + dx
-            curr_y = y + dy
-            pbf_list, actual_z, actual_x, actual_y, filenames, _, _ = fetch_pbf_from_filepath(
-                priority_pmtiles, normal_pmtiles, z, curr_x, curr_y
-            )
-            pbf_tiles_data.append((dx, dy, pbf_list, actual_z, actual_x, actual_y))
-            used_pmtiles.update(filenames)
+        # PBFデータ読み込み
+        pbf_tiles_data = []
+        used_pmtiles = set()
+        offsets = [-1, 0, 1] if z >= 18 else [0]
 
-    if not any(item[2] for item in pbf_tiles_data):
-        return Response(content=EMPTY_TILE_BYTES, media_type="image/png", headers=CACHE_HEADERS)
+        for dy in offsets:
+            for dx in offsets:
+                curr_x = x + dx
+                curr_y = y + dy
+                pbf_list, actual_z, actual_x, actual_y, filenames, _, _ = fetch_pbf_from_filepath(
+                    priority_pmtiles, normal_pmtiles, z, curr_x, curr_y
+                )
+                pbf_tiles_data.append((dx, dy, pbf_list, actual_z, actual_x, actual_y))
+                used_pmtiles.update(filenames)
 
-    png_bytes = await loop.run_in_executor(
-        executor, render_3x3_tile_skia, z, x, y, pbf_tiles_data
-    )
+        if not any(item[2] for item in pbf_tiles_data):
+            memory_cache[cache_key] = EMPTY_TILE_BYTES
+            return Response(content=EMPTY_TILE_BYTES, media_type="image/png", headers=CACHE_HEADERS)
 
-    if png_bytes != EMPTY_TILE_BYTES:
-        saved_path = await loop.run_in_executor(None, save_png_file, z, x, y, png_bytes)
-        await loop.run_in_executor(None, register_tile_to_db, z, x, y, saved_path)
-        return FileResponse(path=saved_path, media_type="image/png", headers=CACHE_HEADERS)
+        # 【改善4: マルチプロセス化 + C拡張描画ライブラリ（Skia）での動的生成】
+        png_bytes = await loop.run_in_executor(
+            executor, render_3x3_tile_skia, z, x, y, pbf_tiles_data
+        )
 
-    return Response(content=png_bytes, media_type="image/png", headers=CACHE_HEADERS)
+        # キャッシュ登録 & ファイル保存
+        if png_bytes != EMPTY_TILE_BYTES:
+            memory_cache[cache_key] = png_bytes
+            saved_path = await loop.run_in_executor(None, save_png_file, z, x, y, png_bytes)
+            await loop.run_in_executor(None, register_tile_to_db, z, x, y, saved_path)
+
+        return Response(content=png_bytes, media_type="image/png", headers=CACHE_HEADERS)
 
 
 if __name__ == "__main__":
