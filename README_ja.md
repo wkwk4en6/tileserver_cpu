@@ -67,7 +67,7 @@ brew install pmtiles
 pmtiles ツールをインストールしたら、公式サイトからpmtilesを抽出します。
 
 ```Bash
-pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/planet_x0-z7.pmtiles --maxzoom=7
+pmtiles extract https://build.protomaps.com/2026xxxx.pmtiles world-pmtiles/planet_z0-z7.pmtiles --maxzoom=7
 ```
 ※ _URL の日付部分(2026xxxx)は必要に応じて最新のビルドデータに変更してください。_
 
