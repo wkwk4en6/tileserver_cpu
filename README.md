@@ -95,7 +95,7 @@ python tileserver_cpu.py
 │   ├── leaflet.css
 │   └── fonts/NotoSansCJK-Regular/NotoSansCJK-Regular.ttc             
 ├── world-pmtiles/         # Directory for storing PMTiles data
-│   ├── planet_x0-z7.pmtiles
+│   ├── planet_z0-z7.pmtiles
 │   └── *.pmtiles
 ├── cache_tiles/           # Generated tile cache (Auto-created on server start)
 ├── tile_cache.db          # SQLite cache database (Auto-created on server start)

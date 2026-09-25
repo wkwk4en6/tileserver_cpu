@@ -96,7 +96,7 @@ http://localhost:8990
 │   ├── leaflet.css
 │   └── fonts/NotoSansCJK-Regular/NotoSansCJK-Regular.ttc             
 ├── world-pmtiles/         # PMTiles データ格納用
-│   ├── planet_x0-z7.pmtiles
+│   ├── planet_z0-z7.pmtiles
 │   └── *.pmtiles
 ├── cache_tiles/           # タイルキャッシュ（※サーバ起動後自動作成）
 ├── tile_cache.db          # 生成されたキャッシュDB（※サーバ起動後自動作成）
