@@ -786,71 +786,100 @@ async def get_index():
             }
 
             async function startTilePreload(currentZoom) {
-            const targetZoom = parseInt(document.getElementById('target-zoom-select').value, 10);
-            const statusDiv = document.getElementById('preload-status');
-            const bounds = map.getBounds();
+                const targetZoom = parseInt(document.getElementById('target-zoom-select').value, 10);
+                const statusDiv = document.getElementById('preload-status');
+                const bounds = map.getBounds();
 
-            // 1. 総枚数を計算
-            let totalTiles = 0;
-            for (let z = currentZoom; z <= targetZoom; z++) {
-                const sw = latLonToTile(bounds.getSouth(), bounds.getWest(), z);
-                const ne = latLonToTile(bounds.getNorth(), bounds.getEast(), z);
-                const xCount = Math.abs(sw.x - ne.x) + 1;
-                const yCount = Math.abs(sw.y - ne.y) + 1;
-                totalTiles += xCount * yCount;
-            }
-
-            // 2. 残り予想時間（秒）を計算 (1枚あたり 30ms と仮定)
-            const estimatedMsPerTile = 30; 
-            let remainingSec = Math.ceil((totalTiles * estimatedMsPerTile) / 1000);
-
-            // 時間表示のフォーマット用関数
-            const formatTime = (sec) => {
-                if (sec <= 0) return "まもなく完了...";
-                const m = Math.floor(sec / 60);
-                const s = sec % 60;
-                return m > 0 ? `約${m}分${s}秒` : `約${s}秒`;
-            };
-
-            // 3. 1秒ごとに残り時間をデクリメントして表示を更新するタイマーを開始
-            statusDiv.innerText = `作成中... (全${totalTiles}枚 / 残り目安: ${formatTime(remainingSec)})`;
-            
-            const timerId = setInterval(() => {
-                remainingSec--;
-                if (remainingSec >= 0) {
-                    statusDiv.innerText = `作成中... (全${totalTiles}枚 / 残り目安: ${formatTime(remainingSec)})`;
+                // 1. 総枚数を計算
+                let totalTiles = 0;
+                for (let z = currentZoom; z <= targetZoom; z++) {
+                    const sw = latLonToTile(bounds.getSouth(), bounds.getWest(), z);
+                    const ne = latLonToTile(bounds.getNorth(), bounds.getEast(), z);
+                    const xCount = Math.abs(sw.x - ne.x) + 1;
+                    const yCount = Math.abs(sw.y - ne.y) + 1;
+                    totalTiles += xCount * yCount;
                 }
-            }, 1000);
 
-            const startTime = Date.now();
+                // 2. 残り予想時間（秒）を計算
+                const estimatedMsPerTile = 30; 
+                let remainingSec = Math.ceil((totalTiles * estimatedMsPerTile) / 1000);
 
-            const requestData = {
-                min_lat: bounds.getSouth(),
-                max_lat: bounds.getNorth(),
-                min_lon: bounds.getWest(),
-                max_lon: bounds.getEast(),
-                start_zoom: currentZoom,
-                target_zoom: targetZoom
-            };
+                const requestData = {
+                    min_lat: bounds.getSouth(),
+                    max_lat: bounds.getNorth(),
+                    min_lon: bounds.getWest(),
+                    max_lon: bounds.getEast(),
+                    start_zoom: currentZoom,
+                    target_zoom: targetZoom
+                };
 
-            try {
-                const res = await fetch('/tile/preload', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestData)
-                });
-                const data = await res.json();
+                let isCheckingDB = false;
+                let timerId = null; // タイマーIDを保持
+
+                // 時間表示のフォーマット用関数
+                const updateStatusText = async (sec) => {
+                    if (sec <= 0) {
+                        if (isCheckingDB) return;
+                        isCheckingDB = true;
+
+                        statusDiv.innerText = "まもなく完了... (DB確認中)";
+
+                        try {
+                            const res = await fetch('/tile/check_cached', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(requestData)
+                            });
+                            const checkData = await res.json();
+
+                            if (checkData.all_cached) {
+                                statusDiv.innerText = "完了: 全タイルの作成が完了しました";
+                                if (timerId) clearInterval(timerId); // ★キャッシュ確認完了時にタイマー停止
+                            } else {
+                                statusDiv.innerText = "まもなく完了... (最終タイル確認中)";
+                            }
+                        } catch (e) {
+                            statusDiv.innerText = "まもなく完了...";
+                        } finally {
+                            isCheckingDB = false;
+                        }
+                    } else {
+                        const m = Math.floor(sec / 60);
+                        const s = sec % 60;
+                        const timeStr = m > 0 ? `約${m}分${s}秒` : `約${s}秒`;
+                        statusDiv.innerText = `作成中... (全${totalTiles}枚 / 残り目安: ${timeStr})`;
+                    }
+                };
+
+                // 初期表示
+                updateStatusText(remainingSec);
                 
-                // 処理完了時にタイマーを停止
-                clearInterval(timerId);
+                // 1秒ごとにタイマー更新＆確認
+                timerId = setInterval(() => {
+                    remainingSec--;
+                    updateStatusText(remainingSec);
+                }, 1000);
 
-                const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
-                statusDiv.innerText = `完了: ${data.generated_count} 枚作成 (スキップ ${data.skipped_count} 枚 / ${elapsedSec}秒)`;
-            } catch (e) {
-                clearInterval(timerId);
-                statusDiv.innerText = "エラーが発生しました";
+                const startTime = Date.now();
+
+                try {
+                    const res = await fetch('/tile/preload', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestData)
+                    });
+                    const data = await res.json();
+                    
+                    // バックエンド処理完了時にタイマー停止
+                    if (timerId) clearInterval(timerId);
+
+                    const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+                    statusDiv.innerText = `完了: ${data.generated_count} 枚作成 (スキップ ${data.skipped_count} 枚 / ${elapsedSec}秒)`;
+                } catch (e) {
+                    if (timerId) clearInterval(timerId);
+                    statusDiv.innerText = "エラーが発生しました";
+                }
             }
-        }
         </script>
     </body>
     </html>
@@ -900,6 +929,41 @@ def latlon_to_tile(lat: float, lon: float, zoom: int) -> Tuple[int, int]:
     ytile = int((1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
     return (max(0, min(xtile, n - 1)), max(0, min(ytile, n - 1)))
 
+class CheckCachedRequest(BaseModel):
+    min_lat: float
+    max_lat: float
+    min_lon: float
+    max_lon: float
+    start_zoom: int
+    target_zoom: int
+
+@app.post("/tile/check_cached")
+async def check_cached_tiles(req: CheckCachedRequest):
+    """最後のタイルがDB/メモリにキャッシュされているかだけをピンポイントで確認する"""
+    loop = asyncio.get_running_loop()
+    
+    # 最高ズームレベル（target_zoom）の最後のタイル位置を取得
+    z = req.target_zoom
+    x_min, y_max = latlon_to_tile(req.min_lat, req.min_lon, z)
+    x_max, y_min = latlon_to_tile(req.max_lat, req.max_lon, z)
+
+    last_x = max(x_min, x_max)
+    last_y = max(y_min, y_max)
+
+    cache_key = f"{z}/{last_x}/{last_y}"
+    
+    # メモリキャッシュまたはファイル/DBキャッシュを確認
+    is_cached = False
+    if cache_key in memory_cache:
+        is_cached = True
+    else:
+        cached_path = await loop.run_in_executor(None, get_tile_file_path, z, last_x, last_y)
+        if cached_path:
+            is_cached = True
+
+    return {
+        "all_cached": is_cached
+    }
 
 @app.post("/tile/preload")
 async def preload_tiles(req: PreloadRequest):
