@@ -1,5 +1,5 @@
 import asyncio
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import gzip
 import math
@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import mapbox_vector_tile
 from pmtiles.reader import MmapSource, Reader
+from pydantic import BaseModel
 import skia
 import uvicorn
 
@@ -23,9 +24,9 @@ TILES_DIR = BASE_DIR / "cache_tiles"
 
 # --- 設定値 ---
 MAX_WAIT_TIME = 1.5  # 秒（セマフォ待機がこれを超えた古いリクエストは破棄）
-MAX_WORKERS = os.cpu_count() or 4  # マルチプロセス数（CPUコア数）
+MAX_WORKERS = os.cpu_count() or 4  # スレッド数
 
-# --- インメモリキャッシュ（1次キャッシュ: DB/ディスクアクセスすらスキップ） ---
+# --- インメモリキャッシュ ---
 memory_cache: Dict[str, bytes] = {}
 
 # --- PMTiles のメタデータ構造 ---
@@ -70,7 +71,7 @@ class LoadedPMTiles:
 priority_pmtiles: List[LoadedPMTiles] = []
 normal_pmtiles: List[LoadedPMTiles] = []
 
-executor: Optional[ProcessPoolExecutor] = None
+executor: Optional[ThreadPoolExecutor] = None
 render_semaphore: Optional[asyncio.Semaphore] = None
 
 CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
@@ -164,13 +165,9 @@ def create_empty_tile_png() -> bytes:
     surface = skia.Surface(256, 256)
     surface.getCanvas().clear(LAND_COLOR)
     image = surface.makeImageSnapshot()
-    
-    # 第1引数に PNG、第2引数に品質(100)を明示的に指定
     data = image.encodeToData(skia.EncodedImageFormat.kPNG, 100)
     if data is None:
-        # 万が一失敗した場合は引数なし（デフォルトPNG）でフォールバック
         data = image.encodeToData()
-        
     return data.bytes() if data is not None else b""
 
 
@@ -183,8 +180,7 @@ async def lifespan(app: FastAPI):
     init_db()
     TILES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # マルチプロセスプロセスクラブと同期セマフォの初期化
-    executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     render_semaphore = asyncio.Semaphore(MAX_WORKERS)
 
     for folder in ["world-pmtiles"]:
@@ -566,13 +562,43 @@ def render_3x3_tile_skia(
     else:
         image = full_image
 
-    # 確実に PNG フォーマットでエンコード
     data = image.encodeToData(skia.EncodedImageFormat.kPNG, 100)
     if data is None:
         data = image.encodeToData()
         
     return data.bytes() if data is not None else EMPTY_TILE_BYTES
 
+
+def generate_single_tile(z: int, x: int, y: int) -> bytes:
+    """単一のタイル画像を直接生成して保存する内部ヘルパー関数"""
+    cache_key = f"{z}/{x}/{y}"
+
+    pbf_tiles_data = []
+    used_pmtiles = set()
+    offsets = [-1, 0, 1] if z >= 18 else [0]
+
+    for dy in offsets:
+        for dx in offsets:
+            curr_x = x + dx
+            curr_y = y + dy
+            pbf_list, actual_z, actual_x, actual_y, filenames, _, _ = fetch_pbf_from_filepath(
+                priority_pmtiles, normal_pmtiles, z, curr_x, curr_y
+            )
+            pbf_tiles_data.append((dx, dy, pbf_list, actual_z, actual_x, actual_y))
+            used_pmtiles.update(filenames)
+
+    if not any(item[2] for item in pbf_tiles_data):
+        memory_cache[cache_key] = EMPTY_TILE_BYTES
+        return EMPTY_TILE_BYTES
+
+    png_bytes = render_3x3_tile_skia(z, x, y, pbf_tiles_data)
+
+    if png_bytes != EMPTY_TILE_BYTES:
+        memory_cache[cache_key] = png_bytes
+        saved_path = save_png_file(z, x, y, png_bytes)
+        register_tile_to_db(z, x, y, saved_path)
+
+    return png_bytes
 
 
 ASSETS_DIR = BASE_DIR / "assets"
@@ -582,7 +608,6 @@ if ASSETS_DIR.exists():
 
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
-    # 既存のHTML（省略なしで維持）
     html_content = """
     <!DOCTYPE html>
     <html lang="ja">
@@ -611,6 +636,20 @@ async def get_index():
                 margin-left: 10px;
                 font-size: 10px;
                 color: #444;
+            }
+            .preload-box {
+                margin-top: 8px;
+                padding-top: 6px;
+                border-top: 1px dashed #ccc;
+            }
+            .preload-box select, .preload-box button {
+                font-size: 11px;
+                padding: 2px 4px;
+            }
+            .preload-status {
+                margin-top: 4px;
+                color: #d9534f;
+                font-weight: bold;
             }
         </style>
     </head>
@@ -695,13 +734,25 @@ async def get_index():
                                 detailsHtml = ' None';
                             }
 
+                            let selectOptions = '';
+                            for (let z = zoom; z <= 18; z++) {
+                                selectOptions += `<option value="${z}" ${z === Math.min(zoom + 2, 18) ? 'selected' : ''}>Zoom ${z}</option>`;
+                            }
+
                             this._container.innerHTML = `
                                 <b>Center Tile Info</b><br>
                                 Zoom: ${zoom} | X: ${tileX} | Y: ${tileY}<br>
                                 Bounds: [${data.lat_min?.toFixed(3)}, ${data.lon_min?.toFixed(3)}] ~ [${data.lat_max?.toFixed(3)}, ${data.lon_max?.toFixed(3)}]<br>
                                 <span style="color:#008000"><b>Intersected:</b></span> ${data.intersected.join(', ') || 'None'}<br>
                                 <span style="color:#0000ff"><b>Render Source & Vector Content:</b></span><br>${detailsHtml}<br>
-                                <div style="margin-top:4px;"><a href="${tileUrl}" target="_blank" rel="noopener">Open Current Center Tile PNG ↗</a></div>`;
+                                <div style="margin-top:4px;"><a href="${tileUrl}" target="_blank" rel="noopener">Open Current Center Tile PNG ↗</a></div>
+                                
+                                <div class="preload-box">
+                                    <b>⚡ タイル画像事前作成</b><br>
+                                    目標ズーム: <select id="target-zoom-select">${selectOptions}</select>
+                                    <button onclick="startTilePreload(${zoom})">事前作成開始</button>
+                                    <div id="preload-status" class="preload-status"></div>
+                                </div>`;
                         });
                 }
             });
@@ -721,6 +772,85 @@ async def get_index():
                     debugControl.update();
                 }
             });
+
+            // 緯度経度からタイル座標(X, Y)を取得するヘルパー関数
+            function latLonToTile(lat, lon, zoom) {
+                const n = Math.pow(2, zoom);
+                const latRad = lat * Math.PI / 180;
+                const xtile = Math.floor((lon + 180) / 360 * n);
+                const ytile = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+                return {
+                    x: Math.max(0, Math.min(xtile, n - 1)),
+                    y: Math.max(0, Math.min(ytile, n - 1))
+                };
+            }
+
+            async function startTilePreload(currentZoom) {
+            const targetZoom = parseInt(document.getElementById('target-zoom-select').value, 10);
+            const statusDiv = document.getElementById('preload-status');
+            const bounds = map.getBounds();
+
+            // 1. 総枚数を計算
+            let totalTiles = 0;
+            for (let z = currentZoom; z <= targetZoom; z++) {
+                const sw = latLonToTile(bounds.getSouth(), bounds.getWest(), z);
+                const ne = latLonToTile(bounds.getNorth(), bounds.getEast(), z);
+                const xCount = Math.abs(sw.x - ne.x) + 1;
+                const yCount = Math.abs(sw.y - ne.y) + 1;
+                totalTiles += xCount * yCount;
+            }
+
+            // 2. 残り予想時間（秒）を計算 (1枚あたり 30ms と仮定)
+            const estimatedMsPerTile = 30; 
+            let remainingSec = Math.ceil((totalTiles * estimatedMsPerTile) / 1000);
+
+            // 時間表示のフォーマット用関数
+            const formatTime = (sec) => {
+                if (sec <= 0) return "まもなく完了...";
+                const m = Math.floor(sec / 60);
+                const s = sec % 60;
+                return m > 0 ? `約${m}分${s}秒` : `約${s}秒`;
+            };
+
+            // 3. 1秒ごとに残り時間をデクリメントして表示を更新するタイマーを開始
+            statusDiv.innerText = `作成中... (全${totalTiles}枚 / 残り目安: ${formatTime(remainingSec)})`;
+            
+            const timerId = setInterval(() => {
+                remainingSec--;
+                if (remainingSec >= 0) {
+                    statusDiv.innerText = `作成中... (全${totalTiles}枚 / 残り目安: ${formatTime(remainingSec)})`;
+                }
+            }, 1000);
+
+            const startTime = Date.now();
+
+            const requestData = {
+                min_lat: bounds.getSouth(),
+                max_lat: bounds.getNorth(),
+                min_lon: bounds.getWest(),
+                max_lon: bounds.getEast(),
+                start_zoom: currentZoom,
+                target_zoom: targetZoom
+            };
+
+            try {
+                const res = await fetch('/tile/preload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestData)
+                });
+                const data = await res.json();
+                
+                // 処理完了時にタイマーを停止
+                clearInterval(timerId);
+
+                const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+                statusDiv.innerText = `完了: ${data.generated_count} 枚作成 (スキップ ${data.skipped_count} 枚 / ${elapsedSec}秒)`;
+            } catch (e) {
+                clearInterval(timerId);
+                statusDiv.innerText = "エラーが発生しました";
+            }
+        }
         </script>
     </body>
     </html>
@@ -754,17 +884,76 @@ async def get_tile_debug(z: int, x: int, y: int):
     }
 
 
+class PreloadRequest(BaseModel):
+    min_lat: float
+    max_lat: float
+    min_lon: float
+    max_lon: float
+    start_zoom: int
+    target_zoom: int
+
+def latlon_to_tile(lat: float, lon: float, zoom: int) -> Tuple[int, int]:
+    """緯度経度からタイル座標 (x, y) を計算するヘルパー関数"""
+    n = 1 << zoom
+    lat_rad = math.radians(lat)
+    xtile = int((lon + 180.0) / 360.0 * n)
+    ytile = int((1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
+    return (max(0, min(xtile, n - 1)), max(0, min(ytile, n - 1)))
+
+
+@app.post("/tile/preload")
+async def preload_tiles(req: PreloadRequest):
+    """表示圏内のタイル画像を事前に一括生成・保存するAPI"""
+    loop = asyncio.get_running_loop()
+
+    tiles_to_generate = []
+
+    for z in range(req.start_zoom, req.target_zoom + 1):
+        x_min, y_max = latlon_to_tile(req.min_lat, req.min_lon, z)
+        x_max, y_min = latlon_to_tile(req.max_lat, req.max_lon, z)
+
+        x_start, x_end = min(x_min, x_max), max(x_min, x_max)
+        y_start, y_end = min(y_min, y_max), max(y_min, y_max)
+
+        for x in range(x_start, x_end + 1):
+            for y in range(y_start, y_end + 1):
+                tiles_to_generate.append((z, x, y))
+
+    generated_count = 0
+    skipped_count = 0
+
+    for z, x, y in tiles_to_generate:
+        cache_key = f"{z}/{x}/{y}"
+        if cache_key in memory_cache:
+            skipped_count += 1
+            continue
+
+        cached_path = await loop.run_in_executor(None, get_tile_file_path, z, x, y)
+        if cached_path:
+            skipped_count += 1
+            continue
+
+        await loop.run_in_executor(executor, generate_single_tile, z, x, y)
+        generated_count += 1
+
+    return {
+        "status": "success",
+        "total_requested": len(tiles_to_generate),
+        "generated_count": generated_count,
+        "skipped_count": skipped_count
+    }
+
 @app.get("/tile/{z}/{x}/{y}.png")
 async def get_png_tile(z: int, x: int, y: int):
     cache_key = f"{z}/{x}/{y}"
     start_time = time.time()
     loop = asyncio.get_running_loop()
 
-    # 【改善1: インメモリキャッシュ（1次キャッシュ）】
+    # インメモリキャッシュ（1次キャッシュ）
     if cache_key in memory_cache:
         return Response(content=memory_cache[cache_key], media_type="image/png", headers=CACHE_HEADERS)
 
-    # 【改善2: ディスク/DBキャッシュ（2次キャッシュ）】
+    # ディスク/DBキャッシュ（2次キャッシュ）
     cached_file_path = await loop.run_in_executor(None, get_tile_file_path, z, x, y)
     if cached_file_path:
         try:
@@ -775,14 +964,11 @@ async def get_png_tile(z: int, x: int, y: int):
         except Exception:
             pass
 
-    # 【改善3: LIFO 優先度制御・セマフォ制御 ＆ タイムアウト廃棄】
-    # CPUコア数分の並列ワーカーが空くまで待機
+    # セマフォ制御 ＆ タイムアウト廃棄
     async with render_semaphore:
-        # 自分の順番が来た時点で、リクエスト受領から長時間（1.5秒以上）経過していれば画像を生成せず破棄
         if time.time() - start_time > MAX_WAIT_TIME:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-        # 待機中に他の並列処理が同じタイルを生成してキャッシュした場合の二重生成チェック
         if cache_key in memory_cache:
             return Response(content=memory_cache[cache_key], media_type="image/png", headers=CACHE_HEADERS)
 
@@ -805,7 +991,7 @@ async def get_png_tile(z: int, x: int, y: int):
             memory_cache[cache_key] = EMPTY_TILE_BYTES
             return Response(content=EMPTY_TILE_BYTES, media_type="image/png", headers=CACHE_HEADERS)
 
-        # 【改善4: マルチプロセス化 + C拡張描画ライブラリ（Skia）での動的生成】
+        # スレッドプール上での動的描画実行
         png_bytes = await loop.run_in_executor(
             executor, render_3x3_tile_skia, z, x, y, pbf_tiles_data
         )
@@ -820,4 +1006,5 @@ async def get_png_tile(z: int, x: int, y: int):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8990)
+    filename = Path(__file__).stem
+    uvicorn.run(f"{filename}:app", host="127.0.0.1", port=8990, workers=8)
