@@ -17,8 +17,13 @@ from pmtiles.reader import MmapSource, Reader
 from pydantic import BaseModel
 import skia
 import uvicorn
+import sys
 
+# カレントディレクトリ（スクリプトのある場所）を検索パスに追加
 BASE_DIR = Path(__file__).parent.resolve()
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 DB_PATH = BASE_DIR / "tile_cache.db"
 TILES_DIR = BASE_DIR / "cache_tiles"
 
