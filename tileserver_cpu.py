@@ -18,6 +18,8 @@ from pydantic import BaseModel
 import skia
 import uvicorn
 import sys
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 # カレントディレクトリ（スクリプトのある場所）を検索パスに追加
 BASE_DIR = Path(__file__).parent.resolve()
@@ -339,6 +341,31 @@ def render_3x3_tile_skia(
         else:
             typeface = skia.Typeface.MakeFromName("sans-serif", skia.FontStyle.Normal())
 
+        # フォント読み込みと FontMgr / Typeface の設定
+        font_mgr = skia.FontMgr.RefDefault()
+        
+        # --- 修正箇所 1: フォントを個別に読み込んで保持する ---
+        cjk_font_path = BASE_DIR / "assets" / "fonts" / "NotoSansCJK-Regular" / "NotoSansCJK-Regular.ttc"
+        arabic_font_path = BASE_DIR / "assets" / "fonts" / "Noto_Sans_Arabic" / "NotoSansArabic-Regular.ttf"
+
+        # デフォルト（CJK/英語用）フォント
+        if cjk_font_path.exists():
+            tf_cjk = skia.Typeface.MakeFromFile(str(cjk_font_path))
+        else:
+            tf_cjk = skia.Typeface.MakeFromName("sans-serif", skia.FontStyle.Normal())
+        font_cjk = skia.Font(tf_cjk, 11)
+
+        # アラビア文字用フォント
+        if arabic_font_path.exists():
+            tf_arabic = skia.Typeface.MakeFromFile(str(arabic_font_path))
+            font_arabic = skia.Font(tf_arabic, 11)
+        else:
+            font_arabic = font_cjk
+
+        # アラビア文字が含まれているか判定するヘルパー関数
+        def is_arabic_text(text: str) -> bool:
+            return any('\u0600' <= char <= '\u06FF' or '\u0750' <= char <= '\u077F' or '\u08A0' <= char <= '\u08FF' for char in text)
+
         font = skia.Font(typeface, 11)
         paint_text = skia.Paint(Color=skia.Color(50, 50, 50, 255), AntiAlias=True)
         paint_text_halo = skia.Paint(Color=skia.Color(255, 255, 255, 230), AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=3.0)
@@ -494,6 +521,29 @@ def render_3x3_tile_skia(
                             except UnicodeDecodeError: return ""
                         return str(val) if val is not None else ""
 
+                    # アラビア文字が含まれるか判定するヘルパー
+                    def is_arabic_char(char: str) -> bool:
+                        code = ord(char)
+                        return (
+                            0x0600 <= code <= 0x06FF or
+                            0x0750 <= code <= 0x077F or
+                            0x08A0 <= code <= 0x08FF or
+                            0xFB50 <= code <= 0xFDFF or
+                            0xFE70 <= code <= 0xFEFF
+                        )
+
+                    # テキスト整形・アラビア語変換用ヘルパー関数
+                    def process_text_segment(text: str) -> str:
+                        if not text:
+                            return ""
+                        if any(is_arabic_char(c) for c in text):
+                            try:
+                                reshaped = arabic_reshaper.reshape(text)
+                                return get_display(reshaped)
+                            except Exception:
+                                pass
+                        return text
+
                     city_types = {
                         "country", "state", "region", "province",
                         "city", "municipality", "town", "village",
@@ -511,13 +561,16 @@ def render_3x3_tile_skia(
 
                     local_name = properties.get("name") or properties.get("name:ja") or properties.get("name_ja")
                     en_name = properties.get("name:en") or properties.get("name_en")
-                    local_str = to_str(local_name)
+                    local_raw = to_str(local_name)
                     en_str = to_str(en_name)
+
+                    # 各テキスト要素ごとに個別にアラビア語判定と整形を行う
+                    local_str = process_text_segment(local_raw)
 
                     housenumber = to_str(properties.get("addr:housenumber") or properties.get("housenumber"))
                     street = to_str(properties.get("addr:street") or properties.get("street") or properties.get("block_number"))
 
-                    if local_str and en_str and local_str.lower() != en_str.lower():
+                    if local_str and en_str and local_raw.lower() != en_str.lower():
                         name_label = f"{local_str} ({en_str})"
                     else:
                         name_label = local_str or en_str
@@ -536,6 +589,35 @@ def render_3x3_tile_skia(
                     if not label_str:
                         continue
 
+                    # 文字ごとに適切なフォント（Arabic or CJK/Default）を分割して描画するヘルパー
+                    def draw_mixed_text(canvas, text, x, y, paint_halo, paint):
+                        current_x = x
+                        
+                        # 衝突判定用に文字ごとの幅を計算して全体サイズを取得
+                        total_width = 0.0
+                        for char in text:
+                            f = font_arabic if is_arabic_char(char) else font_cjk
+                            total_width += f.measureText(char)
+
+                        bounds = skia.Rect.MakeXYWH(x, y - 11, total_width, 11)
+                        if is_colliding(bounds):
+                            return False
+
+                        # 文字単位で適合するフォントを判定して描画
+                        for char in text:
+                            # 記号や数字でアラビア語文字列に挟まれている場合などの判定補正
+                            f = font_arabic if is_arabic_char(char) else font_cjk
+                            
+                            # 描画
+                            canvas.drawString(char, current_x, y, f, paint_halo)
+                            canvas.drawString(char, current_x, y, f, paint)
+                            
+                            # X座標を文字幅分進める
+                            current_x += f.measureText(char)
+
+                        placed_boxes.append(bounds)
+                        return True
+
                     points = [coords] if geom_type == "Point" else coords
                     for pt in points:
                         if len(pt) < 2: continue
@@ -543,13 +625,7 @@ def render_3x3_tile_skia(
                         py = offset_y + (pt[1] - min_y) * scale
 
                         if 0 <= px <= canvas_size and 0 <= py <= canvas_size:
-                            text_width = font.measureText(label_str)
-                            text_bounds = skia.Rect.MakeXYWH(px, py - 11, text_width, 11)
-
-                            if not is_colliding(text_bounds):
-                                label_canvas.drawString(label_str, px, py, font, paint_text_halo)
-                                label_canvas.drawString(label_str, px, py, font, paint_text)
-                                placed_boxes.append(text_bounds)
+                            draw_mixed_text(label_canvas, label_str, px, py, paint_text_halo, paint_text)
 
     if render_text:
         label_image = label_surface.makeImageSnapshot()
@@ -702,7 +778,7 @@ async def get_index():
                 return tile;
             };
 
-            const overlayMaps = { "タイルグリッド & デバッグ表示": tileGridLayer };
+            const overlayMaps = { "Tile Grid & Debug Display": tileGridLayer };
             L.control.layers(null, overlayMaps, { position: 'topright' }).addTo(map);
 
             const DebugControl = L.Control.extend({
@@ -1025,4 +1101,9 @@ async def get_png_tile(z: int, x: int, y: int):
 
 if __name__ == "__main__":
     filename = Path(__file__).stem
+
+    # Windows環境の場合、SelectorEventLoopを使用する
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     uvicorn.run(f"{filename}:app", host="127.0.0.1", port=8990, workers=8)
