@@ -896,32 +896,34 @@ async def get_index():
 
                 let timerId = null;
 
-                // 時間表示の更新処理
+                // 時間表示の更新処理（0秒になっても「処理中...」のまま待機する）
                 const updateStatusText = (sec) => {
-                    if (sec <= 0) {
-                        if (timerId) clearInterval(timerId);
-                        statusDiv.innerText = "Complete: Generation completed.";
-                    } else {
+                    if (sec > 0) {
                         const m = Math.floor(sec / 60);
                         const s = sec % 60;
                         const timeStr = m > 0 ? `${m}m${s}s` : `${s}s`;
-                        statusDiv.innerText = `processing... (total ${totalTiles} sheets / Left: ${timeStr})`;
+                        statusDiv.innerText = `processing... (total ${totalTiles} sheets / Est. left: ${timeStr})`;
+                    } else {
+                        statusDiv.innerText = `processing... (total ${totalTiles} sheets / Finalizing...)`;
                     }
                 };
 
                 // 初期表示
                 updateStatusText(remainingSec);
                 
-                // 1秒ごとにタイマー更新（0秒になったらカウントストップして「完了」と表示）
+                // 1秒ごとにカウントダウン（0秒以下になってもタイマーは停止し、Finalizing表示にする）
                 timerId = setInterval(() => {
                     remainingSec--;
                     updateStatusText(remainingSec);
+                    if (remainingSec <= 0 && timerId) {
+                        clearInterval(timerId);
+                    }
                 }, 1000);
 
                 const startTime = Date.now();
 
                 try {
-                    // 事前作成リクエストを発行
+                    // 事前作成リクエストを発行（バックエンド側の処理完了を待つ）
                     const res = await fetch('/tile/preload', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -929,7 +931,7 @@ async def get_index():
                     });
                     const data = await res.json();
                     
-                    // バックエンド処理がタイマーより先に終わった場合の表示更新
+                    // サーバーからレスポンスが返ってきて初めて完了表示にする
                     if (timerId) clearInterval(timerId);
                     const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
                     statusDiv.innerText = `Complete: ${data.generated_count} sheets created (skipped ${data.skipped_count} sheets / ${elapsedSec}s)`;
@@ -1015,6 +1017,7 @@ async def preload_tiles(req: PreloadRequest):
 
     generated_count = 0
     skipped_count = 0
+    tasks = []
 
     for z, x, y in tiles_to_generate:
         cache_key = f"{z}/{x}/{y}"
@@ -1027,8 +1030,13 @@ async def preload_tiles(req: PreloadRequest):
             skipped_count += 1
             continue
 
-        await loop.run_in_executor(executor, generate_single_tile, z, x, y)
-        generated_count += 1
+        # スレッドプールで実行するタスクを登録
+        tasks.append(loop.run_in_executor(executor, generate_single_tile, z, x, y))
+
+    # すべてのタイルの事前生成が完了するまで待機
+    if tasks:
+        await asyncio.gather(*tasks)
+        generated_count = len(tasks)
 
     return {
         "status": "success",
