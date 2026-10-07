@@ -1,6 +1,7 @@
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
+arabic-reshaper==3.0.1
 click==8.5.0
 fastapi==0.141.1
 h11==0.16.0
@@ -14,6 +15,7 @@ pybind11==3.1.0
 pyclipper==1.4.0
 pydantic==2.13.5
 pydantic_core==2.46.5
+python-bidi==0.6.11
 setuptools==83.0.0
 shapely==2.1.2
 skia-python==144.0.post2
