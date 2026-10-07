@@ -142,21 +142,26 @@ def get_tile_file_path(z: int, x: int, y: int) -> Optional[str]:
 
 
 def register_tile_to_db(z: int, x: int, y: int, file_path: str):
-    try:
-        now = time.time()
-        conn = sqlite3.connect(DB_PATH, timeout=30.0)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO tile_metadata (z, x, y, file_path, created_at, last_accessed)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (z, x, y, file_path, now, now)
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[DB Write Error] {e}")
+    now = time.time()
+    for retry in range(5):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO tile_metadata (z, x, y, file_path, created_at, last_accessed)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (z, x, y, file_path, now, now)
+            )
+            conn.commit()
+            conn.close()
+            break
+        except sqlite3.OperationalError as e:
+            time.sleep(0.1 * (retry + 1))
+        except Exception as e:
+            print(f"[DB Write Error] {e}")
+            break
 
 
 def save_png_file(z: int, x: int, y: int, data: bytes) -> str:
@@ -871,74 +876,80 @@ async def get_index():
                 const statusDiv = document.getElementById('preload-status');
                 const bounds = map.getBounds();
 
-                // 1. 総枚数を計算
-                let totalTiles = 0;
+                // 1. 生成対象のタイル一覧(z, x, y)をフロント側で列挙
+                const tileList = [];
                 for (let z = currentZoom; z <= targetZoom; z++) {
                     const sw = latLonToTile(bounds.getSouth(), bounds.getWest(), z);
                     const ne = latLonToTile(bounds.getNorth(), bounds.getEast(), z);
-                    const xCount = Math.abs(sw.x - ne.x) + 1;
-                    const yCount = Math.abs(sw.y - ne.y) + 1;
-                    totalTiles += xCount * yCount;
+                    const xStart = Math.min(sw.x, ne.x), xEnd = Math.max(sw.x, ne.x);
+                    const yStart = Math.min(sw.y, ne.y), yEnd = Math.max(sw.y, ne.y);
+
+                    for (let x = xStart; x <= xEnd; x++) {
+                        for (let y = yStart; y <= yEnd; y++) {
+                            tileList.push({ z, x, y });
+                        }
+                    }
                 }
 
-                // 2. 残り予想時間（秒）を計算
-                const estimatedMsPerTile = 30; 
-                let remainingSec = Math.ceil((totalTiles * estimatedMsPerTile) / 1000);
-
-                const requestData = {
-                    min_lat: bounds.getSouth(),
-                    max_lat: bounds.getNorth(),
-                    min_lon: bounds.getWest(),
-                    max_lon: bounds.getEast(),
-                    start_zoom: currentZoom,
-                    target_zoom: targetZoom
-                };
-
-                let timerId = null;
-
-                // 時間表示の更新処理（0秒になっても「処理中...」のまま待機する）
-                const updateStatusText = (sec) => {
-                    if (sec > 0) {
-                        const m = Math.floor(sec / 60);
-                        const s = sec % 60;
-                        const timeStr = m > 0 ? `${m}m${s}s` : `${s}s`;
-                        statusDiv.innerText = `processing... (total ${totalTiles} sheets / Est. left: ${timeStr})`;
-                    } else {
-                        statusDiv.innerText = `processing... (total ${totalTiles} sheets / Finalizing...)`;
-                    }
-                };
-
-                // 初期表示
-                updateStatusText(remainingSec);
-                
-                // 1秒ごとにカウントダウン（0秒以下になってもタイマーは停止し、Finalizing表示にする）
-                timerId = setInterval(() => {
-                    remainingSec--;
-                    updateStatusText(remainingSec);
-                    if (remainingSec <= 0 && timerId) {
-                        clearInterval(timerId);
-                    }
-                }, 1000);
-
+                const total = tileList.length;
+                let completed = 0;
+                const CONCURRENCY = 6; // 同時並列リクエスト数
                 const startTime = Date.now();
 
-                try {
-                    // 事前作成リクエストを発行（バックエンド側の処理完了を待つ）
-                    const res = await fetch('/tile/preload', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(requestData)
-                    });
-                    const data = await res.json();
-                    
-                    // サーバーからレスポンスが返ってきて初めて完了表示にする
-                    if (timerId) clearInterval(timerId);
-                    const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
-                    statusDiv.innerText = `Complete: ${data.generated_count} sheets created (skipped ${data.skipped_count} sheets / ${elapsedSec}s)`;
-                } catch (e) {
-                    if (timerId) clearInterval(timerId);
-                    statusDiv.innerText = "An error occurred";
+                // 初期表示
+                statusDiv.innerHTML = `
+                    <div>Progress: 0 / ${total} tiles (0%)</div>
+                    <div>Est. time remaining: Calculating...</div>
+                `;
+
+                // 時間フォーマット用のヘルパー関数 (秒 -> 分・秒)
+                const formatTime = (sec) => {
+                    if (!isFinite(sec) || sec < 0) return "Calculating...";
+                    const m = Math.floor(sec / 60);
+                    const s = Math.floor(sec % 60);
+                    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+                };
+
+                // 並列キュー処理用ワーカー
+                async function worker() {
+                    while (tileList.length > 0) {
+                        const item = tileList.shift();
+                        if (!item) break;
+
+                        try {
+                            // 1タイルずつリクエストを発行して生成・キャッシュさせる
+                            await fetch(`/tile/${item.z}/${item.x}/${item.y}.png`);
+                        } catch (e) {
+                            // エラー時も処理を止めるためカウントを進める
+                        }
+
+                        completed++;
+                        const pct = Math.floor((completed / total) * 100);
+
+                        // 経過時間から1枚あたりの平均処理時間を算出し、残り時間を予測
+                        const elapsedMs = Date.now() - startTime;
+                        const avgMsPerTile = elapsedMs / completed;
+                        const remainingTiles = total - completed;
+                        const estRemainingSec = (remainingTiles * avgMsPerTile) / 1000;
+
+                        // デバッグウィンドウのステータス更新
+                        statusDiv.innerHTML = `
+                            <div>Progress: ${completed} / ${total} tiles (${pct}%)</div>
+                            <div>Est. time remaining: ${formatTime(estRemainingSec)}</div>
+                        `;
+                    }
                 }
+
+                // ワーカーを同時並行で起動
+                const workers = Array.from({ length: CONCURRENCY }, () => worker());
+                await Promise.all(workers);
+
+                // 完了表示
+                const totalElapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+                statusDiv.innerHTML = `
+                    <div style="color: #28a745;">Complete: ${completed} tiles preloaded!</div>
+                    <div style="color: #555;">Total time: ${formatTime(totalElapsedSec)} (${totalElapsedSec}s)</div>
+                `;
             }
         </script>
     </body>
@@ -1017,8 +1028,9 @@ async def preload_tiles(req: PreloadRequest):
 
     generated_count = 0
     skipped_count = 0
-    tasks = []
-
+    
+    # 事前チェック・未作成タイルのリストアップ
+    target_tiles = []
     for z, x, y in tiles_to_generate:
         cache_key = f"{z}/{x}/{y}"
         if cache_key in memory_cache:
@@ -1030,13 +1042,18 @@ async def preload_tiles(req: PreloadRequest):
             skipped_count += 1
             continue
 
-        # スレッドプールで実行するタスクを登録
-        tasks.append(loop.run_in_executor(executor, generate_single_tile, z, x, y))
+        target_tiles.append((z, x, y))
 
-    # すべてのタイルの事前生成が完了するまで待機
-    if tasks:
+    # バッチ処理（MAX_WORKERS * 2 ずつ並列実行して負荷とタイムアウトを抑える）
+    batch_size = MAX_WORKERS * 2
+    for i in range(0, len(target_tiles), batch_size):
+        batch = target_tiles[i:i + batch_size]
+        tasks = [
+            loop.run_in_executor(executor, generate_single_tile, z, x, y)
+            for z, x, y in batch
+        ]
         await asyncio.gather(*tasks)
-        generated_count = len(tasks)
+        generated_count += len(batch)
 
     return {
         "status": "success",
