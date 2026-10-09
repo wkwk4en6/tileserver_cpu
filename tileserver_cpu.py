@@ -326,7 +326,7 @@ def render_3x3_tile_skia(
     target_y: int,
     pbf_tiles_data: List[Tuple[int, int, Optional[bytes], int, int, int]]
 ) -> bytes:
-    is_multi_tile = target_z >= 18
+    is_multi_tile = target_z == 18
     canvas_size = 768 if is_multi_tile else 256
     tile_size = 256.0
 
@@ -334,7 +334,7 @@ def render_3x3_tile_skia(
     base_canvas = base_surface.getCanvas()
     base_canvas.clear(LAND_COLOR)
 
-    render_text = target_z >= 18
+    render_text = target_z == 18
     if render_text:
         label_surface = skia.Surface(canvas_size, canvas_size)
         label_canvas = label_surface.getCanvas()
