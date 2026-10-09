@@ -661,7 +661,7 @@ def generate_single_tile(z: int, x: int, y: int) -> bytes:
 
     pbf_tiles_data = []
     used_pmtiles = set()
-    offsets = [-1, 0, 1] if z >= 18 else [0]
+    offsets = [-1, 0, 1] if z == 18 else [0]
 
     for dy in offsets:
         for dx in offsets:
@@ -1064,6 +1064,9 @@ async def preload_tiles(req: PreloadRequest):
 
 @app.get("/tile/{z}/{x}/{y}.png")
 async def get_png_tile(z: int, x: int, y: int):
+    if z > 18:
+        return Response(status_code=status.HTTP_400_BAD_REQUEST)
+        
     cache_key = f"{z}/{x}/{y}"
     start_time = time.time()
     loop = asyncio.get_running_loop()
