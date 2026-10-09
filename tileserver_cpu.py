@@ -5,7 +5,6 @@ import gzip
 import math
 import os
 from pathlib import Path
-import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,7 +25,6 @@ BASE_DIR = Path(__file__).parent.resolve()
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-DB_PATH = BASE_DIR / "tile_cache.db"
 TILES_DIR = BASE_DIR / "cache_tiles"
 
 # --- 設定値 ---
@@ -99,69 +97,12 @@ GREEN_KEYWORDS = {
 }
 
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL;")
-        cursor.execute("PRAGMA synchronous=NORMAL;")
-        cursor.execute("PRAGMA busy_timeout=5000;")
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tile_metadata (
-                z INTEGER,
-                x INTEGER,
-                y INTEGER,
-                file_path TEXT,
-                created_at REAL,
-                last_accessed REAL,
-                PRIMARY KEY (z, x, y)
-            )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def get_tile_file_path(z: int, x: int, y: int) -> Optional[str]:
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT file_path FROM tile_metadata WHERE z=? AND x=? AND y=?",
-            (z, x, y)
-        )
-        row = cursor.fetchone()
-        if row and row[0] and os.path.exists(row[0]):
-            return row[0]
-        return None
-    except Exception as e:
-        print(f"[DB Read Error] {e}")
-        return None
-    finally:
-        conn.close()
-
-
-def register_tile_to_db(z: int, x: int, y: int, file_path: str):
-    now = time.time()
-    for retry in range(5):
-        try:
-            conn = sqlite3.connect(DB_PATH, timeout=30.0)
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO tile_metadata (z, x, y, file_path, created_at, last_accessed)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (z, x, y, file_path, now, now)
-            )
-            conn.commit()
-            conn.close()
-            break
-        except sqlite3.OperationalError as e:
-            time.sleep(0.1 * (retry + 1))
-        except Exception as e:
-            print(f"[DB Write Error] {e}")
-            break
+    """z/x/y.png のパスを直接確認して返す"""
+    file_path = TILES_DIR / str(z) / str(x) / f"{y}.png"
+    if file_path.exists():
+        return str(file_path)
+    return None
 
 
 def save_png_file(z: int, x: int, y: int, data: bytes) -> str:
@@ -189,7 +130,6 @@ EMPTY_TILE_BYTES = create_empty_tile_png()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global executor, render_semaphore
-    init_db()
     TILES_DIR.mkdir(parents=True, exist_ok=True)
 
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -242,7 +182,6 @@ def fetch_pbf_from_filepath(
     pbf_list = []
     used_filenames = []
     intersected_filenames = []
-    used_layer_details: Dict[str, Dict[str, int]] = {}
 
     for pmtile in priority_list + normal_list:
         if pmtile.intersects_tile(z, x, y):
@@ -340,38 +279,21 @@ def render_3x3_tile_skia(
         label_canvas = label_surface.getCanvas()
         label_canvas.clear(skia.ColorTRANSPARENT)
 
-        font_path = BASE_DIR / "assets" / "fonts" / "NotoSansCJK-Regular" / "NotoSansCJK-Regular.ttc"
-        if font_path.exists():
-            typeface = skia.Typeface.MakeFromFile(str(font_path))
-        else:
-            typeface = skia.Typeface.MakeFromName("sans-serif", skia.FontStyle.Normal())
-
-        # フォント読み込みと FontMgr / Typeface の設定
-        font_mgr = skia.FontMgr.RefDefault()
-        
-        # --- 修正箇所 1: フォントを個別に読み込んで保持する ---
         cjk_font_path = BASE_DIR / "assets" / "fonts" / "NotoSansCJK-Regular" / "NotoSansCJK-Regular.ttc"
         arabic_font_path = BASE_DIR / "assets" / "fonts" / "Noto_Sans_Arabic" / "NotoSansArabic-Regular.ttf"
 
-        # デフォルト（CJK/英語用）フォント
         if cjk_font_path.exists():
             tf_cjk = skia.Typeface.MakeFromFile(str(cjk_font_path))
         else:
             tf_cjk = skia.Typeface.MakeFromName("sans-serif", skia.FontStyle.Normal())
         font_cjk = skia.Font(tf_cjk, 11)
 
-        # アラビア文字用フォント
         if arabic_font_path.exists():
             tf_arabic = skia.Typeface.MakeFromFile(str(arabic_font_path))
             font_arabic = skia.Font(tf_arabic, 11)
         else:
             font_arabic = font_cjk
 
-        # アラビア文字が含まれているか判定するヘルパー関数
-        def is_arabic_text(text: str) -> bool:
-            return any('\u0600' <= char <= '\u06FF' or '\u0750' <= char <= '\u077F' or '\u08A0' <= char <= '\u08FF' for char in text)
-
-        font = skia.Font(typeface, 11)
         paint_text = skia.Paint(Color=skia.Color(50, 50, 50, 255), AntiAlias=True)
         paint_text_halo = skia.Paint(Color=skia.Color(255, 255, 255, 230), AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=3.0)
         placed_boxes: List[skia.Rect] = []
@@ -526,7 +448,6 @@ def render_3x3_tile_skia(
                             except UnicodeDecodeError: return ""
                         return str(val) if val is not None else ""
 
-                    # アラビア文字が含まれるか判定するヘルパー
                     def is_arabic_char(char: str) -> bool:
                         code = ord(char)
                         return (
@@ -537,7 +458,6 @@ def render_3x3_tile_skia(
                             0xFE70 <= code <= 0xFEFF
                         )
 
-                    # テキスト整形・アラビア語変換用ヘルパー関数
                     def process_text_segment(text: str) -> str:
                         if not text:
                             return ""
@@ -569,7 +489,6 @@ def render_3x3_tile_skia(
                     local_raw = to_str(local_name)
                     en_str = to_str(en_name)
 
-                    # 各テキスト要素ごとに個別にアラビア語判定と整形を行う
                     local_str = process_text_segment(local_raw)
 
                     housenumber = to_str(properties.get("addr:housenumber") or properties.get("housenumber"))
@@ -594,11 +513,8 @@ def render_3x3_tile_skia(
                     if not label_str:
                         continue
 
-                    # 文字ごとに適切なフォント（Arabic or CJK/Default）を分割して描画するヘルパー
                     def draw_mixed_text(canvas, text, x, y, paint_halo, paint):
                         current_x = x
-                        
-                        # 衝突判定用に文字ごとの幅を計算して全体サイズを取得
                         total_width = 0.0
                         for char in text:
                             f = font_arabic if is_arabic_char(char) else font_cjk
@@ -608,16 +524,10 @@ def render_3x3_tile_skia(
                         if is_colliding(bounds):
                             return False
 
-                        # 文字単位で適合するフォントを判定して描画
                         for char in text:
-                            # 記号や数字でアラビア語文字列に挟まれている場合などの判定補正
                             f = font_arabic if is_arabic_char(char) else font_cjk
-                            
-                            # 描画
                             canvas.drawString(char, current_x, y, f, paint_halo)
                             canvas.drawString(char, current_x, y, f, paint)
-                            
-                            # X座標を文字幅分進める
                             current_x += f.measureText(char)
 
                         placed_boxes.append(bounds)
@@ -681,8 +591,7 @@ def generate_single_tile(z: int, x: int, y: int) -> bytes:
 
     if png_bytes != EMPTY_TILE_BYTES:
         memory_cache[cache_key] = png_bytes
-        saved_path = save_png_file(z, x, y, png_bytes)
-        register_tile_to_db(z, x, y, saved_path)
+        save_png_file(z, x, y, png_bytes)
 
     return png_bytes
 
@@ -859,7 +768,6 @@ async def get_index():
                 }
             });
 
-            // 緯度経度からタイル座標(X, Y)を取得するヘルパー関数
             function latLonToTile(lat, lon, zoom) {
                 const n = Math.pow(2, zoom);
                 const latRad = lat * Math.PI / 180;
@@ -876,7 +784,6 @@ async def get_index():
                 const statusDiv = document.getElementById('preload-status');
                 const bounds = map.getBounds();
 
-                // 1. 生成対象のタイル一覧(z, x, y)をフロント側で列挙
                 const tileList = [];
                 for (let z = currentZoom; z <= targetZoom; z++) {
                     const sw = latLonToTile(bounds.getSouth(), bounds.getWest(), z);
@@ -893,16 +800,14 @@ async def get_index():
 
                 const total = tileList.length;
                 let completed = 0;
-                const CONCURRENCY = 6; // 同時並列リクエスト数
+                const CONCURRENCY = 6;
                 const startTime = Date.now();
 
-                // 初期表示
                 statusDiv.innerHTML = `
                     <div>Progress: 0 / ${total} tiles (0%)</div>
                     <div>Est. time remaining: Calculating...</div>
                 `;
 
-                // 時間フォーマット用のヘルパー関数 (秒 -> 分・秒)
                 const formatTime = (sec) => {
                     if (!isFinite(sec) || sec < 0) return "Calculating...";
                     const m = Math.floor(sec / 60);
@@ -910,29 +815,23 @@ async def get_index():
                     return m > 0 ? `${m}m ${s}s` : `${s}s`;
                 };
 
-                // 並列キュー処理用ワーカー
                 async function worker() {
                     while (tileList.length > 0) {
                         const item = tileList.shift();
                         if (!item) break;
 
                         try {
-                            // 1タイルずつリクエストを発行して生成・キャッシュさせる
                             await fetch(`/tile/${item.z}/${item.x}/${item.y}.png`);
-                        } catch (e) {
-                            // エラー時も処理を止めるためカウントを進める
-                        }
+                        } catch (e) {}
 
                         completed++;
                         const pct = Math.floor((completed / total) * 100);
 
-                        // 経過時間から1枚あたりの平均処理時間を算出し、残り時間を予測
                         const elapsedMs = Date.now() - startTime;
                         const avgMsPerTile = elapsedMs / completed;
                         const remainingTiles = total - completed;
                         const estRemainingSec = (remainingTiles * avgMsPerTile) / 1000;
 
-                        // デバッグウィンドウのステータス更新
                         statusDiv.innerHTML = `
                             <div>Progress: ${completed} / ${total} tiles (${pct}%)</div>
                             <div>Est. time remaining: ${formatTime(estRemainingSec)}</div>
@@ -940,11 +839,9 @@ async def get_index():
                     }
                 }
 
-                // ワーカーを同時並行で起動
                 const workers = Array.from({ length: CONCURRENCY }, () => worker());
                 await Promise.all(workers);
 
-                // 完了表示
                 const totalElapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
                 statusDiv.innerHTML = `
                     <div style="color: #28a745;">Complete: ${completed} tiles preloaded!</div>
@@ -1000,13 +897,6 @@ def latlon_to_tile(lat: float, lon: float, zoom: int) -> Tuple[int, int]:
     ytile = int((1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
     return (max(0, min(xtile, n - 1)), max(0, min(ytile, n - 1)))
 
-class CheckCachedRequest(BaseModel):
-    min_lat: float
-    max_lat: float
-    min_lon: float
-    max_lon: float
-    start_zoom: int
-    target_zoom: int
 
 @app.post("/tile/preload")
 async def preload_tiles(req: PreloadRequest):
@@ -1029,7 +919,7 @@ async def preload_tiles(req: PreloadRequest):
     generated_count = 0
     skipped_count = 0
     
-    # 事前チェック・未作成タイルのリストアップ
+    # 事前チェック・未作成タイルのリストアップ (ファイルシステムでチェック)
     target_tiles = []
     for z, x, y in tiles_to_generate:
         cache_key = f"{z}/{x}/{y}"
@@ -1037,14 +927,13 @@ async def preload_tiles(req: PreloadRequest):
             skipped_count += 1
             continue
 
-        cached_path = await loop.run_in_executor(None, get_tile_file_path, z, x, y)
-        if cached_path:
+        if get_tile_file_path(z, x, y):
             skipped_count += 1
             continue
 
         target_tiles.append((z, x, y))
 
-    # バッチ処理（MAX_WORKERS * 2 ずつ並列実行して負荷とタイムアウトを抑える）
+    # バッチ処理
     batch_size = MAX_WORKERS * 2
     for i in range(0, len(target_tiles), batch_size):
         batch = target_tiles[i:i + batch_size]
@@ -1062,21 +951,22 @@ async def preload_tiles(req: PreloadRequest):
         "skipped_count": skipped_count
     }
 
+
 @app.get("/tile/{z}/{x}/{y}.png")
 async def get_png_tile(z: int, x: int, y: int):
     if z > 18:
         return Response(status_code=status.HTTP_400_BAD_REQUEST)
-        
+
     cache_key = f"{z}/{x}/{y}"
     start_time = time.time()
     loop = asyncio.get_running_loop()
 
-    # インメモリキャッシュ（1次キャッシュ）
+    # 1次キャッシュ：インメモリ
     if cache_key in memory_cache:
         return Response(content=memory_cache[cache_key], media_type="image/png", headers=CACHE_HEADERS)
 
-    # ディスク/DBキャッシュ（2次キャッシュ）
-    cached_file_path = await loop.run_in_executor(None, get_tile_file_path, z, x, y)
+    # 2次キャッシュ：PNGファイルの直接存在チェック (DBを使わない)
+    cached_file_path = get_tile_file_path(z, x, y)
     if cached_file_path:
         try:
             with open(cached_file_path, "rb") as f:
@@ -1097,7 +987,7 @@ async def get_png_tile(z: int, x: int, y: int):
         # PBFデータ読み込み
         pbf_tiles_data = []
         used_pmtiles = set()
-        offsets = [-1, 0, 1] if z >= 18 else [0]
+        offsets = [-1, 0, 1] if z == 18 else [0]
 
         for dy in offsets:
             for dx in offsets:
@@ -1121,8 +1011,7 @@ async def get_png_tile(z: int, x: int, y: int):
         # キャッシュ登録 & ファイル保存
         if png_bytes != EMPTY_TILE_BYTES:
             memory_cache[cache_key] = png_bytes
-            saved_path = await loop.run_in_executor(None, save_png_file, z, x, y, png_bytes)
-            await loop.run_in_executor(None, register_tile_to_db, z, x, y, saved_path)
+            save_png_file(z, x, y, png_bytes)
 
         return Response(content=png_bytes, media_type="image/png", headers=CACHE_HEADERS)
 
