@@ -234,7 +234,7 @@ def fetch_pbf_from_filepath(
                         except Exception:
                             continue
 
-                        pbf_list.append(tile_data)
+                        pbf_list.append((pmtile.path.name, tile_data))
                         if pmtile.path.name not in used_filenames:
                             used_filenames.append(pmtile.path.name)
                         
@@ -282,6 +282,7 @@ def render_3x3_tile_skia(
         latin_font_path = BASE_DIR / "assets" / "fonts" / "NotoSans" / "NotoSans-Regular.ttf"
         cjk_font_path = BASE_DIR / "assets" / "fonts" / "NotoSans" / "NotoSansCJK-Regular.ttc"
         arabic_font_path = BASE_DIR / "assets" / "fonts" / "NotoSans" / "NotoSansArabic-Regular.ttf"
+        hebrew_font_path = BASE_DIR / "assets" / "fonts" / "NotoSans" / "NotoSansHebrew-Regular.ttf"
 
         # 2. Typeface および Font の準備
         if latin_font_path.exists():
@@ -302,18 +303,29 @@ def render_3x3_tile_skia(
         else:
             font_arabic = font_latin
 
-        # 3. 文字ごとの適切な Font 選択ヘルパー関数
+        if hebrew_font_path.exists():
+            tf_hebrew = skia.Typeface.MakeFromFile(str(hebrew_font_path))
+            font_hebrew = skia.Font(tf_hebrew, 11)
+        else:
+            font_hebrew = font_latin
+
+        # 文字ごとの適切な Font 選択ヘルパー関数
         def get_font_for_char(char: str) -> skia.Font:
             code = ord(char)
-            # 1. アラビア文字
-            if (0x0600 <= code <= 0x06FF or 0x0750 <= code <= 0x077F or
-                0x08A0 <= code <= 0x08FF or 0xFB50 <= code <= 0xFDFF or 0xFE70 <= code <= 0xFEFF):
+            # 1. ヘブライ文字（Hebrew & Hebrew Presentation Forms）
+            if (0x0590 <= code <= 0x05FF or 0xFB1D <= code <= 0xFB4F):
+                return font_hebrew
+            # 2. アラビア文字
+            elif (0x0600 <= code <= 0x06FF or 0x0750 <= code <= 0x077F or
+                  0x08A0 <= code <= 0x08FF or 0xFB50 <= code <= 0xFDFF or 0xFE70 <= code <= 0xFEFF):
                 return font_arabic
-            # 2. CJK（漢字・ひらがな・カタカナ等）
+            # 3. CJK（漢字・ひらがな・カタカナ・ハングル等）
             elif (0x3000 <= code <= 0x303F or 0x3040 <= code <= 0x309F or 0x30A0 <= code <= 0x30FF or
-                0x4E00 <= code <= 0x9FFF or 0xFF00 <= code <= 0xFFEF):
+                  0x4E00 <= code <= 0x9FFF or 0xFF00 <= code <= 0xFFEF or
+                  0xAC00 <= code <= 0xD7AF or 0x1100 <= code <= 0x11FF or
+                  0x3130 <= code <= 0x318F or 0xA960 <= code <= 0xA97F or 0xD7B0 <= code <= 0xD7FF):
                 return font_cjk
-            # 3. 基本ラテン文字および拡張ラテン文字 (アゼルバイジャン語の Ə/ə, Ğ/ğ, Ş/ş, İ/ı 等)
+            # 4. 基本ラテン文字および拡張ラテン文字 (アゼルバイジャン語の Ə/ə, Ğ/ğ, Ş/ş, İ/ı 等)
             else:
                 return font_latin
 
@@ -353,11 +365,17 @@ def render_3x3_tile_skia(
 
     tiles_to_process = []
     for dx, dy, pbf_bytes_list, actual_z, actual_x, actual_y in pbf_tiles_data:
-        for pbf_data in pbf_bytes_list:
+        # pbf_bytes_list が (filename, bytes) のリストになったため
+        for item in pbf_bytes_list:
+            if isinstance(item, tuple):
+                fname, pbf_data = item
+            else:
+                fname, pbf_data = "", item
+
             if pbf_data:
                 try:
                     decoded = mapbox_vector_tile.decode(pbf_data, default_options={"y_coord_down": True})
-                    tiles_to_process.append((dx, dy, decoded, actual_z, actual_x, actual_y))
+                    tiles_to_process.append((dx, dy, decoded, actual_z, actual_x, actual_y, fname))
                 except Exception as e:
                     print(f"[Decode Error] {e}")
 
@@ -365,7 +383,7 @@ def render_3x3_tile_skia(
         return EMPTY_TILE_BYTES
 
     all_layer_names = set()
-    for _, _, tile_dict, _, _, _ in tiles_to_process:
+    for _, _, tile_dict, _, _, _, _ in tiles_to_process:  # 要素を 7つにする (_ を1つ追加)
         all_layer_names.update(tile_dict.keys())
 
     sorted_layer_names = sorted(all_layer_names, key=get_layer_priority)
@@ -386,8 +404,11 @@ def render_3x3_tile_skia(
         if target_z < 11 and is_road_layer:
             continue
 
-        for dx, dy, tile_dict, actual_z, actual_x, actual_y in tiles_to_process:
+        for dx, dy, tile_dict, actual_z, actual_x, actual_y, source_filename in tiles_to_process:
             if layer_name not in tile_dict:
+                continue
+
+            if "azerbaijan" in source_filename.lower() and layer_lower == "water_polygons":
                 continue
 
             layer = tile_dict[layer_name]
