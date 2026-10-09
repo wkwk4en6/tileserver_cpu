@@ -279,20 +279,43 @@ def render_3x3_tile_skia(
         label_canvas = label_surface.getCanvas()
         label_canvas.clear(skia.ColorTRANSPARENT)
 
-        cjk_font_path = BASE_DIR / "assets" / "fonts" / "NotoSansCJK-Regular" / "NotoSansCJK-Regular.ttc"
-        arabic_font_path = BASE_DIR / "assets" / "fonts" / "Noto_Sans_Arabic" / "NotoSansArabic-Regular.ttf"
+        latin_font_path = BASE_DIR / "assets" / "fonts" / "NotoSans" / "NotoSans-Regular.ttf"
+        cjk_font_path = BASE_DIR / "assets" / "fonts" / "NotoSans" / "NotoSansCJK-Regular.ttc"
+        arabic_font_path = BASE_DIR / "assets" / "fonts" / "NotoSans" / "NotoSansArabic-Regular.ttf"
+
+        # 2. Typeface および Font の準備
+        if latin_font_path.exists():
+            tf_latin = skia.Typeface.MakeFromFile(str(latin_font_path))
+        else:
+            tf_latin = skia.Typeface.MakeFromName("sans-serif", skia.FontStyle.Normal())
+        font_latin = skia.Font(tf_latin, 11)
 
         if cjk_font_path.exists():
             tf_cjk = skia.Typeface.MakeFromFile(str(cjk_font_path))
         else:
-            tf_cjk = skia.Typeface.MakeFromName("sans-serif", skia.FontStyle.Normal())
+            tf_cjk = tf_latin
         font_cjk = skia.Font(tf_cjk, 11)
 
         if arabic_font_path.exists():
             tf_arabic = skia.Typeface.MakeFromFile(str(arabic_font_path))
             font_arabic = skia.Font(tf_arabic, 11)
         else:
-            font_arabic = font_cjk
+            font_arabic = font_latin
+
+        # 3. 文字ごとの適切な Font 選択ヘルパー関数
+        def get_font_for_char(char: str) -> skia.Font:
+            code = ord(char)
+            # 1. アラビア文字
+            if (0x0600 <= code <= 0x06FF or 0x0750 <= code <= 0x077F or
+                0x08A0 <= code <= 0x08FF or 0xFB50 <= code <= 0xFDFF or 0xFE70 <= code <= 0xFEFF):
+                return font_arabic
+            # 2. CJK（漢字・ひらがな・カタカナ等）
+            elif (0x3000 <= code <= 0x303F or 0x3040 <= code <= 0x309F or 0x30A0 <= code <= 0x30FF or
+                0x4E00 <= code <= 0x9FFF or 0xFF00 <= code <= 0xFFEF):
+                return font_cjk
+            # 3. 基本ラテン文字および拡張ラテン文字 (アゼルバイジャン語の Ə/ə, Ğ/ğ, Ş/ş, İ/ı 等)
+            else:
+                return font_latin
 
         paint_text = skia.Paint(Color=skia.Color(50, 50, 50, 255), AntiAlias=True)
         paint_text_halo = skia.Paint(Color=skia.Color(255, 255, 255, 230), AntiAlias=True, Style=skia.Paint.kStroke_Style, StrokeWidth=3.0)
@@ -517,7 +540,7 @@ def render_3x3_tile_skia(
                         current_x = x
                         total_width = 0.0
                         for char in text:
-                            f = font_arabic if is_arabic_char(char) else font_cjk
+                            f = get_font_for_char(char)  # 正しく文字ごとのフォントを選択
                             total_width += f.measureText(char)
 
                         bounds = skia.Rect.MakeXYWH(x, y - 11, total_width, 11)
@@ -525,7 +548,7 @@ def render_3x3_tile_skia(
                             return False
 
                         for char in text:
-                            f = font_arabic if is_arabic_char(char) else font_cjk
+                            f = get_font_for_char(char)  # 正しく文字ごとのフォントを選択
                             canvas.drawString(char, current_x, y, f, paint_halo)
                             canvas.drawString(char, current_x, y, f, paint)
                             current_x += f.measureText(char)
