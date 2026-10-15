@@ -435,7 +435,8 @@ def render_3x3_tile_skia(
                 if geom_type in ["Polygon", "MultiPolygon"]:
                     polygons = coords if geom_type == "MultiPolygon" else [coords]
                     prop_values = {str(v).lower() for v in properties.values()}
-                    is_green = is_green_layer or bool(prop_values & GREEN_KEYWORDS)
+                    # ズーム7以下では緑色の配色（GREEN_COLOR）を適用しない
+                    is_green = (target_z > 7) and (is_green_layer or bool(prop_values & GREEN_KEYWORDS))
                     is_water = is_water_layer or "water" in prop_values
 
                     fill_paint = paint_land
